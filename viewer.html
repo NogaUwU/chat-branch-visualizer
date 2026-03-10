@@ -28,7 +28,6 @@
       <div id="cbv-partial-banner" class="cbv-partial-banner" hidden>
         <span class="cbv-partial-banner-icon">⚠️</span>
         <span class="cbv-partial-banner-text">This is a partial tree</span>
-        <button id="btn-dismiss-partial-banner" class="cbv-partial-banner-close" type="button" aria-label="Dismiss partial tree warning">×</button>
       </div>
     </div>
 
@@ -54,9 +53,11 @@
     </div>
     <div class="cbv-tool-stack">
     <button id="btn-build" class="cbv-tool-fab cbv-build-fab" style="--cbv-tool-expand-width: 132px;" title="Build full tree by traversing all branches">
-      <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-        <path d="M9.8 2.2L13.2 5.6L11.7 7.1L10.4 5.8L7.7 8.5L8.8 9.6L7.4 11L4.9 8.5L6.3 7.1L7.3 8.1L10 5.4L8.6 4L9.8 2.2Z" fill="currentColor" opacity=".92"/>
-        <rect x="2.2" y="10.1" width="5.1" height="2" rx="1" transform="rotate(-45 2.2 10.1)" fill="currentColor" opacity=".92"/>
+      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M9.4 2.2L13.8 6.6L12.3 8.1L7.9 3.7L9.4 2.2Z" fill="currentColor"/>
+        <path d="M7.4 4.1L9.2 5.9L8.2 6.9L6.4 5.1L7.4 4.1Z" fill="currentColor" opacity=".95"/>
+        <path d="M5.5 5.9L10.1 10.5L8.9 11.7L4.3 7.1L5.5 5.9Z" fill="currentColor" opacity=".92"/>
+        <path d="M3.2 10.9L5.9 8.2L7.8 10.1L5.1 12.8H3.2V10.9Z" fill="currentColor" opacity=".92"/>
       </svg>
       <span>Build Full Tree</span>
     </button>
@@ -74,12 +75,14 @@
       </svg>
       <span>Fit</span>
     </button>
-    <button id="btn-expand-toggle" class="cbv-tool-fab cbv-expand-fab" style="--cbv-tool-expand-width: 96px;" title="Expand all chains">
-      <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-        <path d="M3 4.5H13M3 8H10M3 11.5H13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-        <path d="M11 6L13 4L15 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <button id="btn-expand-toggle" class="cbv-tool-fab cbv-expand-fab" style="--cbv-tool-expand-width: 110px;" title="Expand all chains">
+      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M3 5H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M3 8H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M3 11H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M10.5 3.5L13 6L15.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <span>Expand</span>
+      <span>Expand All</span>
     </button>
     </div>
     <div id="cbv-loading" hidden>
@@ -115,6 +118,7 @@
     </div>
   </div>
 </div>
+<script src="platform-config.js"></script>
 <script src="viewer.js"></script>
 </body>
 </html>

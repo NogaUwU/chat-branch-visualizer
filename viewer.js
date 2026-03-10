@@ -15,8 +15,10 @@ let forceCollapseAll = false;
 let treeCompleteness = 'partial';
 let treeLoadingMode = 'idle';
 let treeLoadingTimer = null;
+let treeLoadingShownAt = 0;
 let currentTabId = null;
 let currentPageUrl = '';
+let currentPlatform = 'unknown';
 
 let cam = { x: 20, y: 20, scale: 1 };
 let isPanning = false;
@@ -83,6 +85,7 @@ let layoutMap = new Map();
   const params = new URLSearchParams(location.search);
   currentTabId = Number(params.get('tabId')) || null;
   currentPageUrl = params.get('src') || '';
+  currentPlatform = detectCurrentPlatform();
 
   const port = chrome.runtime.connect({ name: 'cbv-viewer' });
   port.postMessage({ type: 'REGISTER', tabId: currentTabId });
@@ -92,7 +95,6 @@ let layoutMap = new Map();
   document.getElementById('btn-cancel').addEventListener('click', () => { sendToContent({ type: 'CANCEL' }); });
   document.getElementById('btn-fit').addEventListener('click', fitView);
   document.getElementById('btn-expand-toggle').addEventListener('click', toggleExpandCollapseAll);
-  document.getElementById('btn-dismiss-partial-banner').addEventListener('click', dismissPartialBanner);
   document.getElementById('btn-build-cancel').addEventListener('click', closeBuildModal);
   document.getElementById('btn-build-confirm').addEventListener('click', confirmBuild);
   document.getElementById('cbv-zoom-slider').addEventListener('input', onZoomSliderInput);
@@ -119,14 +121,20 @@ function onContentMessage(msg) {
     case 'PAGE_READY':
       if (msg.url && msg.url !== currentPageUrl) {
         currentPageUrl = msg.url;
+        currentPlatform = msg.platform || detectCurrentPlatform();
         resetTreeState();
+        showTreeLoading('Loading conversation…', 'Syncing tree with the newly opened chat', 'conversation');
         restoreFromStorage();
       } else {
         currentPageUrl = msg.url || currentPageUrl;
+        currentPlatform = msg.platform || detectCurrentPlatform();
       }
-      setStatus(`Connected — ${msg.platform}`, 'ok');
+      setStatus(`Connected — ${formatPlatformName(msg.platform)}`, 'ok');
       break;
     case 'SCAN_RESULT':
+      {
+      const wasEmpty = treeNodes.size === 0;
+      const wasPartial = treeCompleteness === 'partial';
       msg.turns = sanitizeTurns(msg.turns);
       mergeTurnsIntoTree(msg.turns);
       if (treeCompleteness !== 'full') setTreeCompleteness('partial');
@@ -138,8 +146,10 @@ function onContentMessage(msg) {
         text: t.text,
       })));
       setVisiblePathState([]);
+      if (wasEmpty || !wasPartial) setExpandedByDefaultForPartial();
       renderTree();
       break;
+      }
     case 'BUILD_START':
       treeNodes.clear();
       activePath.clear();
@@ -150,7 +160,7 @@ function onContentMessage(msg) {
       setTreeCompleteness('building');
       setProgress(0);
       showProgress();
-      showTreeLoading('Building full tree…', 'ChatGPT may switch branches while history is collected', 'build');
+      showTreeLoading('Building full tree…', `${assistantDisplayName()} may switch branches while history is collected`, 'build');
       setStatus('Building tree…', 'working');
       setBuildBusy();
       break;
@@ -162,15 +172,21 @@ function onContentMessage(msg) {
     }
     case 'BUILD_DONE':
       treeNodes = new Map(msg.nodes.map(n => [n.id, n]));
-      setTreeCompleteness('full');
+      setTreeCompleteness(msg.partial ? 'partial' : 'full');
       setActivePathState(msg.activePath);
       setVisiblePathState([]);
       expandedChainStarts.clear();
       hideProgress();
       setBuildIdle();
       hideTreeLoading(true);
-      setStatus(`${treeNodes.size} nodes · ${countLeaves()} branches`, 'ok');
-      collapseByDefault();
+      setStatus(
+        msg.partial
+          ? `${treeNodes.size} nodes · partial tree (${msg.reason || 'incomplete'})`
+          : `${treeNodes.size} nodes · ${countLeaves()} branches`,
+        msg.partial ? 'idle' : 'ok'
+      );
+      if (msg.partial) setExpandedByDefaultForPartial();
+      else collapseByDefault();
       requestAnimationFrame(fitView);
       break;
     case 'BUILD_ERROR':
@@ -197,23 +213,27 @@ function onContentMessage(msg) {
       break;
     case 'VISIBLE_RANGE':
       setVisiblePathState(sanitizeTurns(msg.visiblePath));
-      if (treeLoadingMode !== 'build') hideTreeLoading(false);
       renderTree();
       break;
 
     case 'CONVERSATION_LOADING':
-      showTreeLoading('Loading conversation…', 'Waiting for ChatGPT to finish switching branches', 'conversation');
+      showTreeLoading('Loading conversation…', `Waiting for ${assistantDisplayName()} to finish switching branches`, 'conversation');
       break;
 
     case 'STATE_SYNC':
+      {
+      const wasEmpty = treeNodes.size === 0;
+      const wasPartial = treeCompleteness === 'partial';
       msg.turns = sanitizeTurns(msg.turns);
       msg.activePath = sanitizeTurns(msg.activePath);
       mergeTurnsIntoTree(msg.turns);
       if (treeCompleteness !== 'full') setTreeCompleteness('partial');
       setActivePathState(msg.activePath);
-      if (treeLoadingMode !== 'build') hideTreeLoading(false);
+      if (msg.turns.length > 0 || msg.activePath.length > 0) hideTreeLoading(false);
+      if ((wasEmpty || !wasPartial) && treeCompleteness === 'partial') setExpandedByDefaultForPartial();
       renderTree();
       break;
+      }
   }
 }
 
@@ -227,7 +247,7 @@ function navigateTo(nodeId) {
     cur = cur.parentId ? treeNodes.get(cur.parentId) : null;
   }
   sendToContent({ type: 'NAVIGATE', path });
-  showTreeLoading('Switching branch…', 'Waiting for ChatGPT to load the selected branch', 'switch');
+  showTreeLoading('Switching branch…', `Waiting for ${assistantDisplayName()} to load the selected branch`, 'switch');
   setStatus(`Navigating to turn ${node.turnIndex + 1}, branch ${node.branchIndex}…`, 'working');
 }
 
@@ -340,7 +360,12 @@ function updateExpandToggleButton() {
   btn.title = expanded ? 'Collapse all chains' : 'Expand all chains';
   btn.classList.toggle('cbv-tool-fab-active', expanded);
   const label = btn.querySelector('span');
-  if (label) label.textContent = expanded ? 'Collapse' : 'Expand';
+  if (label) label.textContent = expanded ? 'Collapse All' : 'Expand All';
+  btn.style.setProperty('--cbv-tool-expand-width', expanded ? '110px' : '102px');
+  const icon = btn.querySelector('svg');
+  if (icon) icon.innerHTML = expanded
+    ? '<path d="M3 5H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 8H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 11H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.5 4.5L13 2L15.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.5 11.5L13 14L15.5 11.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
+    : '<path d="M3 5H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 8H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 11H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.5 3.5L13 6L15.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.5 12.5L13 10L15.5 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>';
 }
 
 function setTreeCompleteness(mode) {
@@ -368,6 +393,7 @@ function updateBuildButtonLabel() {
   const label = btn.querySelector('span');
   if (label) label.textContent = treeCompleteness === 'full' ? 'Update Tree' : 'Build Full Tree';
   btn.style.setProperty('--cbv-tool-expand-width', treeCompleteness === 'full' ? '108px' : '132px');
+  btn.classList.toggle('cbv-build-fab-attention', treeCompleteness === 'partial');
   btn.title = treeCompleteness === 'full'
     ? 'Update the full tree by traversing branches again'
     : 'Build full tree by traversing all branches';
@@ -376,14 +402,7 @@ function updateBuildButtonLabel() {
 function updatePartialBanner() {
   const el = document.getElementById('cbv-partial-banner');
   if (!el) return;
-  let dismissed = false;
-  try { dismissed = localStorage.getItem('cbv-hide-partial-banner') === '1'; } catch (_) {}
-  el.hidden = treeCompleteness !== 'partial' || dismissed;
-}
-
-function dismissPartialBanner() {
-  try { localStorage.setItem('cbv-hide-partial-banner', '1'); } catch (_) {}
-  updatePartialBanner();
+  el.hidden = treeCompleteness !== 'partial';
 }
 
 function maybeStartBuild() {
@@ -413,6 +432,7 @@ function showTreeLoading(text = 'Updating tree…', subtext = '', mode = 'transi
   const sub = document.getElementById('cbv-loading-subtext');
   clearTimeout(treeLoadingTimer);
   treeLoadingMode = mode;
+  treeLoadingShownAt = Date.now();
   if (label) label.textContent = text;
   if (sub) sub.textContent = subtext;
   if (el) el.hidden = false;
@@ -442,6 +462,14 @@ function resetTreeState() {
 
 function hideTreeLoading(force = false) {
   if (!force && treeLoadingMode === 'build') return;
+  if (!force && treeLoadingMode !== 'idle') {
+    const elapsed = Date.now() - treeLoadingShownAt;
+    if (elapsed < 420) {
+      clearTimeout(treeLoadingTimer);
+      treeLoadingTimer = setTimeout(() => hideTreeLoading(true), 420 - elapsed);
+      return;
+    }
+  }
   clearTimeout(treeLoadingTimer);
   treeLoadingTimer = null;
   treeLoadingMode = 'idle';
@@ -454,6 +482,17 @@ function hideTreeLoading(force = false) {
 function toggleExpandCollapseAll() {
   if (hasExpandedChains()) collapseAllChains();
   else expandAllChains();
+}
+
+function setExpandedByDefaultForPartial() {
+  if (treeCompleteness !== 'partial') return;
+  const next = new Set();
+  treeNodes.forEach(node => {
+    const chain = collectCollapsibleChain(node.id);
+    if (chain.length) next.add(chain[0]);
+  });
+  expandedChainStarts = next;
+  updateExpandToggleButton();
 }
 
 function collapseByDefault() {
@@ -999,7 +1038,7 @@ function renderTree() {
 
       appendNodeBadge(g, textX + 1, kickerY - 1, badgeKind, isActive);
 
-      const roleLabel = isCluster ? 'Collapsed' : (isUser ? 'User' : (assistantBrand() === 'claude' ? 'Claude' : 'ChatGPT'));
+      const roleLabel = isCluster ? 'Collapsed' : (isUser ? 'User' : assistantDisplayName());
       g.appendChild(svgText(textX + 13, kickerY, roleLabel, {
         fill: C.nodeTxMuted,
         'font-size': '10', 'font-weight': '700',
@@ -1566,8 +1605,21 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+function formatPlatformName(platform) {
+  return cbvFormatPlatformName(platform);
+}
+
 function assistantBrand() {
-  return currentPageUrl.includes('claude.ai') ? 'claude' : 'chatgpt';
+  return cbvGetAssistantBadgeKind(detectCurrentPlatform());
+}
+
+function assistantDisplayName() {
+  const platform = detectCurrentPlatform();
+  return platform && platform !== 'unknown' ? formatPlatformName(platform) : 'Assistant';
+}
+
+function detectCurrentPlatform() {
+  return currentPlatform !== 'unknown' ? currentPlatform : cbvDetectPlatform(currentPageUrl);
 }
 
 function appendNodeBadge(parent, cx, cy, kind, active = false) {
@@ -1699,13 +1751,7 @@ async function restoreFromStorage() {
 }
 
 function storageKeyFromUrl(url) {
-  try {
-    const u = new URL(url);
-    if (!u.hostname.includes('chatgpt.com') && !u.hostname.includes('chat.openai.com') && !u.hostname.includes('claude.ai')) return null;
-    return 'cbv_tree_' + (u.pathname + u.hash).replace(/[^a-zA-Z0-9]/g, '_').slice(0, 120);
-  } catch {
-    return null;
-  }
+  return cbvMakeStorageKey(url);
 }
 
 function timeAgo(ts) {

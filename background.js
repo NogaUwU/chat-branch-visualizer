@@ -3,6 +3,8 @@
 //   1. Open side panel when toolbar icon clicked
 //   2. Route messages between content.js <-> sidepanel.js
 
+importScripts('platform-config.js');
+
 // ── Open side panel on action click ──────────────────────────────────────────
 chrome.action.onClicked.addListener(tab => {
   chrome.sidePanel.open({ tabId: tab.id });
@@ -11,10 +13,7 @@ chrome.action.onClicked.addListener(tab => {
 // ── Enable side panel for supported pages ─────────────────────────────────────
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status !== 'complete') return;
-  const supported =
-    tab.url?.includes('chatgpt.com') ||
-    tab.url?.includes('chat.openai.com') ||
-    tab.url?.includes('claude.ai');
+  const supported = cbvIsSupportedUrl(tab.url || '');
   chrome.sidePanel.setOptions({
     tabId,
     enabled: supported,
@@ -50,8 +49,9 @@ chrome.runtime.onConnect.addListener(port => {
 
   port.onMessage.addListener(async msg => {
     if (msg.type === 'REGISTER') {
+      if (tabId && tabId !== msg.tabId) removeUiPort(tabId, port);
       tabId = msg.tabId;
-      addUiPort(tabId, port);
+      if (tabId) addUiPort(tabId, port);
       return;
     }
 

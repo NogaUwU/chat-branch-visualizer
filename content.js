@@ -1,4 +1,4 @@
-// content.js — runs in the ChatGPT/Claude page
+// content.js — runs in supported assistant chat pages
 // Responsibilities: DOM scanning, branch navigation
 // Communicates with sidepanel.js via background.js message passing
 
@@ -10,6 +10,7 @@
   const NAV_RETRIES   = 2;     // retry attempts if nav appears stuck
   const DEBOUNCE_MS   = 180;
   const VIEWPORT_SYNC_MS = 100;
+  const BUILD_TIMEOUT_MS = 45000;
   const PLATFORM      = detectPlatform();
 
   let mutTimer  = null;
@@ -26,10 +27,7 @@
 
   // ── Platform ────────────────────────────────────────────────────────────────
   function detectPlatform() {
-    const h = location.hostname;
-    if (h.includes('chatgpt.com') || h.includes('chat.openai.com')) return 'chatgpt';
-    if (h.includes('claude.ai'))  return 'claude';
-    return 'unknown';
+    return cbvDetectPlatform(location.href);
   }
 
   // ── Boot ────────────────────────────────────────────────────────────────────
@@ -96,17 +94,34 @@ function makePathEntry(turn) {
     observer?.disconnect();
 
     const treeNodes = new Map();
+    const buildDeadline = Date.now() + BUILD_TIMEOUT_MS;
 
     sendToPanel({ type: 'BUILD_START' });
 
     try {
-      await dfsCollect(null, 0, treeNodes);
+      await dfsCollect(null, 0, treeNodes, buildDeadline);
     } catch (e) {
       const reason = cancelled ? 'cancelled' : e.message;
-      sendToPanel({ type: cancelled ? 'BUILD_CANCELLED' : 'BUILD_ERROR', message: reason });
       building   = false;
       cancelled  = false;
       startObserver();
+      if (reason === 'build_timeout') {
+        const activePath = readCurrentPath();
+        sendToPanel({
+          type: 'BUILD_DONE',
+          nodes: [...treeNodes.values()],
+          activePath,
+          partial: true,
+          reason: 'timeout',
+        });
+        sendToPanel({
+          type: 'BUILD_WARNING',
+          message: `Build timed out after ${Math.round(BUILD_TIMEOUT_MS / 1000)}s. Partial tree restored.`,
+        });
+        saveToStorage(treeNodes, activePath);
+        return { ok: true, partial: true };
+      }
+      sendToPanel({ type: cancelled ? 'BUILD_CANCELLED' : 'BUILD_ERROR', message: reason });
       return { ok: false };
     }
 
@@ -155,8 +170,9 @@ function makePathEntry(turn) {
   }
 
   // ── DFS tree builder ─────────────────────────────────────────────────────────
-  async function dfsCollect(parentId, turnIdx, treeNodes) {
+  async function dfsCollect(parentId, turnIdx, treeNodes, buildDeadline) {
     if (cancelled) throw new Error('cancelled');
+    if (Date.now() > buildDeadline) throw new Error('build_timeout');
 
     const turns = readRawTurns();
     if (turnIdx >= turns.length) return;
@@ -167,6 +183,7 @@ function makePathEntry(turn) {
 
     for (let b = 1; b <= branchTotal; b++) {
       if (cancelled) throw new Error('cancelled');
+      if (Date.now() > buildDeadline) throw new Error('build_timeout');
 
       // Navigate to branch b
       const curTurns = readRawTurns();
@@ -221,9 +238,10 @@ function makePathEntry(turn) {
         turnCount: turns.length,
       });
 
-      await dfsCollect(nodeId, turnIdx + 1, treeNodes);
+      await dfsCollect(nodeId, turnIdx + 1, treeNodes, buildDeadline);
 
       if (cancelled) throw new Error('cancelled');
+      if (Date.now() > buildDeadline) throw new Error('build_timeout');
 
       // Restore to b after recursion
       const afterTurns = readRawTurns();
@@ -235,6 +253,7 @@ function makePathEntry(turn) {
     }
 
     if (cancelled) throw new Error('cancelled');
+    if (Date.now() > buildDeadline) throw new Error('build_timeout');
 
     // Backtrack to original
     const finalTurns = readRawTurns();
@@ -268,6 +287,8 @@ function makePathEntry(turn) {
   // Single attempt to nav turn to target — times out after NAV_TIMEOUT ms
   async function tryNavToTarget(turn, target) {
     const deadline = Date.now() + NAV_TIMEOUT;
+    let stagnantCount = 0;
+    let lastSig = '';
 
     for (let step = 0; step < 30; step++) {
       if (cancelled) return false;
@@ -276,9 +297,27 @@ function makePathEntry(turn) {
       const fresh = readRawTurns()[turn.turnIndex];
       if (!fresh) return false;
       if (fresh.branchIndex === target) return true;
+      if (target < 1 || target > (fresh.branchTotal || 1)) return false;
 
-      if (target > fresh.branchIndex) { fresh.nextBtn?.click(); }
-      else                            { fresh.prevBtn?.click(); }
+      const sig = buildTurnStateSig(fresh);
+      stagnantCount = sig === lastSig ? stagnantCount + 1 : 0;
+      lastSig = sig;
+
+      const wantsNext = target > fresh.branchIndex;
+      const btn = wantsNext ? fresh.nextBtn : fresh.prevBtn;
+      if (!btn || isDisabledButton(btn)) {
+        // Try once after bringing the turn into view; if still unavailable, fail fast.
+        if (fresh.article) scrollToTurn(fresh.article);
+        await sleep(Math.min(NAV_WAIT_MS, 220));
+        const retried = readRawTurns()[turn.turnIndex];
+        const retryBtn = wantsNext ? retried?.nextBtn : retried?.prevBtn;
+        if (!retryBtn || isDisabledButton(retryBtn)) return false;
+        retryBtn.click();
+      } else {
+        btn.click();
+      }
+
+      if (stagnantCount >= 3) return false;
 
       await sleep(NAV_WAIT_MS);
     }
@@ -290,9 +329,11 @@ function makePathEntry(turn) {
 
   // ── DOM reading ──────────────────────────────────────────────────────────────
   function readRawTurns() {
-    if (PLATFORM === 'chatgpt') return readChatGPTTurns();
-    if (PLATFORM === 'claude')  return readClaudeTurns();
-    return readGenericTurns();
+    const reader = {
+      chatgpt: readChatGPTTurns,
+      claude: readClaudeTurns,
+    }[PLATFORM];
+    return reader ? reader() : readGenericTurns();
   }
 
   function readChatGPTTurns() {
@@ -301,7 +342,7 @@ function makePathEntry(turn) {
       const role   = turn.getAttribute('data-turn') === 'user' ? 'user' : 'assistant';
       const msgDiv = turn.querySelector('[data-message-id]');
       const msgId  = msgDiv?.getAttribute('data-message-id') || turn.getAttribute('data-turn-id') || null;
-      const nav    = findBranchNav(turn);
+      const nav    = findChatGPTBranchNav(turn);
       return {
         turnIndex:   idx,
         domId:       msgId,
@@ -321,46 +362,140 @@ function makePathEntry(turn) {
   // users to switch between edited messages. The assistant response following
   // each branch is considered a child of that branch.
   function readClaudeTurns() {
-    // Strategy 1: prefer data-testid human/assistant turns
-    let turnEls = [
-      ...document.querySelectorAll('[data-testid="human-turn"],[data-testid="assistant-turn"]'),
-    ];
+    const userEls = getClaudeUserTurns();
+    if (!userEls.length) return readGenericTurns();
 
-    // Strategy 2: fall back to conversation-turn wrappers
-    if (!turnEls.length) {
-      turnEls = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')];
-    }
+    const assistantGroups = getClaudeAssistantGroups(userEls);
+    const turns = [];
 
-    // Strategy 3: look for message-container divs used in some Claude layouts
-    if (!turnEls.length) {
-      turnEls = [...document.querySelectorAll(
-        '[class*="human-turn"],[class*="assistant-turn"],[class*="HumanTurn"],[class*="AssistantTurn"]'
-      )];
-    }
-
-    return turnEls.map((turn, idx) => {
-      const testId = turn.getAttribute('data-testid') || '';
-      const cls    = turn.className || '';
-      const isUser =
-        testId.includes('human') ||
-        cls.toLowerCase().includes('human') ||
-        cls.toLowerCase().includes('user');
-      const role = isUser ? 'user' : 'assistant';
-
-      const nav = findBranchNav(turn);
-
-      return {
-        turnIndex:   idx,
-        domId:       turn.getAttribute('data-message-id') || null,
-        role,
-        text:        extractText(turn),
-        branchIndex: nav?.current ?? 1,
-        branchTotal: nav?.total   ?? 1,
+    userEls.forEach((userEl, userIdx) => {
+      const nav = findClaudeBranchNav(userEl);
+      const branchIndex = nav?.current ?? 1;
+      const branchTotal = nav?.total ?? 1;
+      turns.push({
+        turnIndex:   turns.length,
+        domId:       userEl.getAttribute('data-message-id') || null,
+        role:        'user',
+        text:        extractText(userEl),
+        branchIndex,
+        branchTotal,
         prevBtn:     nav?.prevBtn ?? null,
         nextBtn:     nav?.nextBtn ?? null,
-        article:     turn,
+        article:     userEl,
+      });
+
+      const group = assistantGroups[userIdx];
+      if (!group?.text) return;
+      turns.push({
+        turnIndex:   turns.length,
+        domId:       buildClaudeAssistantDomId(userEl, userIdx, group.text, branchIndex),
+        role:        'assistant',
+        text:        group.text,
+        branchIndex: 1,
+        branchTotal: 1,
+        prevBtn:     null,
+        nextBtn:     null,
+        article:     group.article,
+      });
+    });
+
+    return turns;
+  }
+
+  function getClaudeUserTurns() {
+    const selectors = [
+      '[data-testid="user-message"]',
+      '[class*="font-user-message"]',
+      '[data-testid="human-turn"]',
+      '[class*="human-turn"]',
+      '[class*="HumanTurn"]',
+    ];
+    return dedupeElements(selectTopLevelCandidates(selectors)
+      .filter(el => isReadableTurnCandidate(el, { minText: 2 })))
+      .sort((a, b) => rectTop(a) - rectTop(b));
+  }
+
+  function getClaudeAssistantGroups(userEls) {
+    const allCandidates = getClaudeAssistantCandidates(userEls);
+    const groups = userEls.map((userEl, idx) => {
+      const startY = rectTop(userEl);
+      const endY = idx + 1 < userEls.length ? rectTop(userEls[idx + 1]) : Infinity;
+      const intervalCandidates = allCandidates.filter(el => {
+        const centerY = rectCenterY(el);
+        return centerY > startY && centerY < endY;
+      });
+      const groupEls = dedupeElements(intervalCandidates)
+        .filter(el => !intervalCandidates.some(other => other !== el && other.contains(el)));
+      if (!groupEls.length) return null;
+
+      const text = [...new Set(groupEls
+        .map(extractText)
+        .filter(Boolean))]
+        .join('\n');
+      if (!text) return null;
+
+      return {
+        domId: groupEls.find(el => el.getAttribute('data-message-id'))?.getAttribute('data-message-id') || null,
+        text: text.replace(/\s*\n\s*/g, ' ').trim(),
+        article: groupEls[0],
       };
     });
+
+    if (groups.some(Boolean)) return groups;
+
+    // Fallback: recover assistant text by scanning generic readable blocks in each gap.
+    return userEls.map((userEl, idx) => {
+      const startY = rectTop(userEl);
+      const endY = idx + 1 < userEls.length ? rectTop(userEls[idx + 1]) : Infinity;
+      const fallbackEls = [...document.querySelectorAll('main p, main pre, main li, main blockquote, main h1, main h2, main h3, main div')]
+        .filter(el => {
+          if (userEls.some(user => user === el || user.contains(el))) return false;
+          if (isClaudeBranchNavWidget(el)) return false;
+          if (!isReadableTurnCandidate(el, { minText: 12 })) return false;
+          const style = getComputedStyle(el);
+          if (style.position === 'absolute' || style.position === 'fixed') return false;
+          const centerY = rectCenterY(el);
+          return centerY > startY && centerY < endY;
+        });
+      const topLevel = dedupeElements(fallbackEls)
+        .filter(el => !fallbackEls.some(other => other !== el && other.contains(el)));
+      const text = [...new Set(topLevel.map(extractText).filter(Boolean))].join(' ').trim();
+      if (!text) return null;
+      return {
+        domId: null,
+        text,
+        article: topLevel[0],
+      };
+    });
+  }
+
+  function getClaudeAssistantCandidates(userEls) {
+    const selectors = [
+      '[data-testid="assistant-turn"]',
+      '[data-testid="assistant-message"]',
+      '.font-claude-response',
+      '.font-claude-response-body',
+      '.standard-markdown',
+      '[class*="font-claude-message"]',
+      'main [class*="prose"]',
+      'main [class*="whitespace-pre-wrap"]',
+      'main [class*="markdown"]',
+      'main [data-testid*="assistant"]',
+      'main p',
+      'main pre',
+      'main li',
+      'main blockquote',
+    ];
+
+    return dedupeElements(selectors.flatMap(sel => [...document.querySelectorAll(sel)]))
+      .filter(el => isReadableTurnCandidate(el, { minText: 8 }))
+      .filter(el => !userEls.some(userEl => userEl === el || userEl.contains(el)))
+      .filter(el => !isClaudeBranchNavWidget(el))
+      .filter(el => {
+        const style = getComputedStyle(el);
+        return style.position !== 'absolute' && style.position !== 'fixed';
+      })
+      .sort((a, b) => rectTop(a) - rectTop(b));
   }
 
   function readGenericTurns() {
@@ -382,69 +517,174 @@ function makePathEntry(turn) {
   // ── findBranchNav ─────────────────────────────────────────────────────────────
   // Locates the X/Y branch counter and associated prev/next buttons.
   // Works for both ChatGPT (aria-label Chinese/English) and Claude.
-  function findBranchNav(container) {
-    const candidates = [];
+  function findChatGPTBranchNav(container) {
+    return findBranchNavInside(container, { allowPositionalFallback: false });
+  }
 
-    // Walk all descendants looking for "X / Y" text patterns
-    for (const el of container.querySelectorAll('*')) {
-      if (el.children.length > 2) continue;
-      const m = el.textContent?.trim().match(/^(\d+)\s*\/\s*(\d+)$/);
-      if (!m) continue;
-      const current = +m[1], total = +m[2];
-      if (total < 2) continue;
-      candidates.push({ el, current, total });
-    }
+  function findClaudeBranchNav(container) {
+    return findBranchNavInside(container, { allowPositionalFallback: true }) || findNearbyClaudeBranchNav(container);
+  }
 
-    if (!candidates.length) return null;
+  function findBranchNavInside(root, { allowPositionalFallback = true } = {}) {
+    return resolveBranchNavFromCandidates(getBranchCounterCandidates(root), { allowPositionalFallback });
+  }
 
-    for (const { el, current, total } of candidates) {
-      // Walk up ancestors to find the button group
-      let node = el.parentElement;
-      for (let lvl = 0; lvl < 6 && node; lvl++) {
-        const btns = [...node.querySelectorAll('button')];
-        if (!btns.length) { node = node.parentElement; continue; }
+  function findNearbyClaudeBranchNav(container) {
+    const containerRect = container.getBoundingClientRect();
+    const nearby = getBranchCounterCandidates(document)
+      .map(candidate => ({ candidate, nav: resolveBranchNavCandidate(candidate, { allowPositionalFallback: true }) }))
+      .filter(entry => entry.nav)
+      .map(entry => {
+        const rect = entry.candidate.el.getBoundingClientRect();
+        const centerY = (rect.top + rect.bottom) / 2;
+        const turnCenterY = (containerRect.top + containerRect.bottom) / 2;
+        const overlap = Math.min(containerRect.bottom, rect.bottom) - Math.max(containerRect.top, rect.top);
+        const dy = Math.abs(centerY - turnCenterY);
+        const dx = Math.max(0, rect.left - containerRect.left);
+        return {
+          ...entry,
+          rect,
+          dy,
+          dx,
+          overlap,
+        };
+      })
+      .filter(entry =>
+        entry.rect.left >= containerRect.left - 24 &&
+        entry.rect.right <= window.innerWidth + 32 &&
+        (entry.overlap > 0 || entry.dy < Math.max(44, containerRect.height * 0.6)) &&
+        entry.dx < Math.max(720, containerRect.width + 120)
+      )
+      .sort((a, b) => {
+        if (a.dy !== b.dy) return a.dy - b.dy;
+        return a.dx - b.dx;
+      });
 
-        // ChatGPT: aria-label based (Chinese or English)
-        const prevBtn = btns.find(b => {
-          const l = (b.getAttribute('aria-label') || '').toLowerCase();
-          return l.includes('上一') || l.includes('prev') || l.includes('previous') || l.includes('earlier');
-        });
-        const nextBtn = btns.find(b => {
-          const l = (b.getAttribute('aria-label') || '').toLowerCase();
-          return l.includes('下一') || l.includes('next') || l.includes('later');
-        });
-        if (prevBtn && nextBtn) return { current, total, prevBtn, nextBtn };
+    return nearby[0]?.nav || null;
+  }
 
-        // Claude: no aria-labels — the two buttons immediately surrounding the
-        // counter element are prev (left) and next (right).
-        // Find buttons that are siblings/neighbors of the counter's parent.
-        if (btns.length >= 2) {
-          const counterRect = el.getBoundingClientRect();
-          const sorted = btns
-            .map(b => ({ b, r: b.getBoundingClientRect() }))
-            .filter(({ r }) => r.width > 0)  // visible only
-            .sort((a, b2) => a.r.left - b2.r.left);
+  function getBranchCounterCandidates(root) {
+    const scope = root?.querySelectorAll ? root : document;
+    return [...scope.querySelectorAll('span,div')]
+      .filter(el => {
+        if (el.children.length > 2) return false;
+        const m = el.textContent?.trim().match(/^(\d+)\s*\/\s*(\d+)$/);
+        if (!m) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 8 && rect.height > 8 && +m[2] > 1;
+      })
+      .map(el => {
+        const m = el.textContent.trim().match(/^(\d+)\s*\/\s*(\d+)$/);
+        return { el, current: +m[1], total: +m[2] };
+      });
+  }
 
-          // Find the two closest buttons to the counter by X position
-          const withDist = sorted.map(({ b, r }) => ({
-            b,
-            dist: Math.abs((r.left + r.right) / 2 - (counterRect.left + counterRect.right) / 2),
-          })).sort((a, b2) => a.dist - b2.dist);
-
-          if (withDist.length >= 2) {
-            const [closestA, closestB] = withDist;
-            const rA = closestA.b.getBoundingClientRect();
-            const rB = closestB.b.getBoundingClientRect();
-            const leftBtn  = rA.left < rB.left ? closestA.b : closestB.b;
-            const rightBtn = rA.left < rB.left ? closestB.b : closestA.b;
-            return { current, total, prevBtn: leftBtn, nextBtn: rightBtn };
-          }
-        }
-
-        node = node.parentElement;
-      }
+  function resolveBranchNavFromCandidates(candidates, options) {
+    for (const candidate of candidates) {
+      const nav = resolveBranchNavCandidate(candidate, options);
+      if (nav) return nav;
     }
     return null;
+  }
+
+  function resolveBranchNavCandidate({ el, current, total }, { allowPositionalFallback = true } = {}) {
+    let node = el.parentElement;
+    for (let lvl = 0; lvl < 6 && node; lvl++) {
+      const btns = [...node.querySelectorAll('button')].filter(isVisibleButton);
+      if (!btns.length) {
+        node = node.parentElement;
+        continue;
+      }
+
+      const prevBtn = btns.find(b => {
+        const l = (b.getAttribute('aria-label') || '').toLowerCase();
+        return l.includes('上一') || l.includes('prev') || l.includes('previous') || l.includes('earlier');
+      });
+      const nextBtn = btns.find(b => {
+        const l = (b.getAttribute('aria-label') || '').toLowerCase();
+        return l.includes('下一') || l.includes('next') || l.includes('later');
+      });
+      if (prevBtn && nextBtn) return { current, total, prevBtn, nextBtn };
+
+      if (allowPositionalFallback && btns.length >= 2) {
+        const counterRect = el.getBoundingClientRect();
+        const withDist = btns
+          .map(b => {
+            const r = b.getBoundingClientRect();
+            const centerX = (r.left + r.right) / 2;
+            const centerY = (r.top + r.bottom) / 2;
+            const counterCenterX = (counterRect.left + counterRect.right) / 2;
+            const counterCenterY = (counterRect.top + counterRect.bottom) / 2;
+            return {
+              b,
+              dist: Math.abs(centerX - counterCenterX) + Math.abs(centerY - counterCenterY),
+              left: r.left,
+            };
+          })
+          .sort((a, b) => a.dist - b.dist);
+
+        if (withDist.length >= 2) {
+          const [a, b] = withDist;
+          const leftBtn = a.left < b.left ? a.b : b.b;
+          const rightBtn = a.left < b.left ? b.b : a.b;
+          return { current, total, prevBtn: leftBtn, nextBtn: rightBtn };
+        }
+      }
+
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function isVisibleButton(btn) {
+    const rect = btn.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function isDisabledButton(btn) {
+    return btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+  }
+
+  function selectTopLevelCandidates(selectors) {
+    const all = dedupeElements(selectors.flatMap(sel => [...document.querySelectorAll(sel)]));
+    return all.filter(el => !all.some(other => other !== el && other.contains(el)));
+  }
+
+  function dedupeElements(elements) {
+    return [...new Set(elements)];
+  }
+
+  function isReadableTurnCandidate(el, { minText = 8 } = {}) {
+    const text = extractText(el);
+    if (text.length < minText) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 80 && rect.height > 12;
+  }
+
+  function isClaudeBranchNavWidget(el) {
+    const text = (el.textContent || '').trim();
+    if (/^\d+\s*\/\s*\d+$/.test(text)) return true;
+    const btnCount = el.querySelectorAll('button').length;
+    return btnCount >= 2 && text.length <= 24 && /\d+\s*\/\s*\d+/.test(text);
+  }
+
+  function rectTop(el) {
+    return el.getBoundingClientRect().top;
+  }
+
+  function rectCenterY(el) {
+    const rect = el.getBoundingClientRect();
+    return (rect.top + rect.bottom) / 2;
+  }
+
+  function buildTurnStateSig(turn) {
+    return `${turn.branchIndex || 0}:${turn.branchTotal || 0}:${textSignature(turn.text)}:${Boolean(turn.prevBtn)}:${Boolean(turn.nextBtn)}`;
+  }
+
+  function buildClaudeAssistantDomId(userEl, userIdx, text, branchIndex) {
+    const anchor = userEl.getAttribute('data-message-id') || `u${userIdx}`;
+    const sig = textSignature(text).replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 36) || 'reply';
+    return `cbv_a_${anchor}_b${branchIndex}_${sig}`;
   }
 
   function readCurrentPath() {
@@ -460,8 +700,7 @@ function makePathEntry(turn) {
   }
 
   function makeNodeId(turnIndex, branchIndex, domId) {
-    if (domId && !domId.startsWith('g_') && !domId.startsWith('claude_')) return domId;
-    return `t${turnIndex}_b${branchIndex}`;
+    return cbvMakeNodeId(turnIndex, branchIndex, domId);
   }
 
   // ── Text extraction ───────────────────────────────────────────────────────────
@@ -526,6 +765,10 @@ function makePathEntry(turn) {
 
   function syncStateToPanel(force = false) {
     const turns = serializeTurns(readRawTurns());
+    if (!turns.length) {
+      sendToPanel({ type: 'CONVERSATION_LOADING' });
+      return;
+    }
     const activePath = turns.map(makePathEntry);
     const sig = JSON.stringify(turns.map(t => `${t.id}:${t.branchTotal}:${textSignature(t.text)}`));
     if (!force && sig === lastStateSig) return;
@@ -651,6 +894,14 @@ function makePathEntry(turn) {
       if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 20) return node;
       node = node.parentElement;
     }
+
+    // Claude sometimes scrolls in a nested react scroller that does not surface on the message node path.
+    const fallback = [...document.querySelectorAll('main div, section div')].find(el => {
+      const style = getComputedStyle(el);
+      return /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 80;
+    });
+    if (fallback) return fallback;
+
     return window;
   }
 

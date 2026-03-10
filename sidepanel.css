@@ -225,24 +225,6 @@ html, body {
   white-space: nowrap;
 }
 
-.cbv-partial-banner-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: currentColor;
-  cursor: pointer;
-  font: 700 12px/1 var(--font-ui);
-}
-
-.cbv-partial-banner-close:hover {
-  background: color-mix(in srgb, currentColor 12%, transparent);
-}
-
 .cbv-actions {
   display: flex;
   align-items: center;
@@ -292,7 +274,7 @@ html, body {
 
 .cbv-menu-item {
   width: 100%;
-  justify-content: flex-start;
+  justify-content: center;
   height: 30px;
   padding: 0 10px;
   border-radius: 10px;
@@ -500,10 +482,13 @@ html, body {
 .cbv-tool-fab:hover,
 .cbv-tool-fab:focus-visible {
   width: var(--cbv-tool-expand-width);
+  justify-content: flex-start;
 }
 
 .cbv-tool-fab svg {
   flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
   transform: translateX(0);
   transition: transform .42s cubic-bezier(0.2, 0.9, 0.2, 1.12);
 }
@@ -561,6 +546,34 @@ html, body {
 .cbv-build-fab {
   background: var(--accent-bg);
   color: var(--accent);
+}
+
+.cbv-build-fab.cbv-build-fab-attention {
+  animation: cbv-build-breathe 1.8s ease-in-out infinite;
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--bd-strong));
+  box-shadow:
+    0 0 0 0 color-mix(in srgb, var(--accent) 22%, transparent),
+    0 4px 18px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.cbv-build-fab.cbv-build-fab-attention:hover,
+.cbv-build-fab.cbv-build-fab-attention:focus-visible {
+  animation-play-state: paused;
+}
+
+@keyframes cbv-build-breathe {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+    box-shadow:
+      0 0 0 0 color-mix(in srgb, var(--accent) 10%, transparent),
+      0 3px 10px color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  50% {
+    transform: translateY(-1px) scale(1.035);
+    box-shadow:
+      0 0 0 8px color-mix(in srgb, var(--accent) 0%, transparent),
+      0 8px 24px color-mix(in srgb, var(--accent) 24%, transparent);
+  }
 }
 
 .cbv-viewer-fab {
