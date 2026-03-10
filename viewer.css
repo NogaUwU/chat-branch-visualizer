@@ -1,0 +1,26 @@
+.cbv-viewer-app #cbv-header {
+  height: 52px;
+  padding: 0 16px;
+}
+
+.cbv-viewer-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cbv-viewer-subtitle {
+  color: var(--tx-muted);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.cbv-viewer-app #cbv-status {
+  height: 32px;
+  padding: 0 16px;
+}
+
+.cbv-viewer-app #cbv-minimap {
+  width: 160px;
+  height: 108px;
+}

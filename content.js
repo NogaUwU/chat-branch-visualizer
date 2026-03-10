@@ -8,13 +8,21 @@
   const NAV_WAIT_MS   = 500;   // ms to wait after each button click
   const NAV_TIMEOUT   = 3000;  // ms before nav is considered stuck
   const NAV_RETRIES   = 2;     // retry attempts if nav appears stuck
-  const DEBOUNCE_MS   = 1200;
+  const DEBOUNCE_MS   = 180;
+  const VIEWPORT_SYNC_MS = 100;
   const PLATFORM      = detectPlatform();
 
   let mutTimer  = null;
   let observer  = null;
   let building  = false;
   let cancelled = false;  // set to true by CANCEL command
+  let viewportTimer = null;
+  let scrollHost = null;
+  let highlightedTurn = null;
+  let pollTimer = null;
+  let lastStateSig = '';
+  let lastVisibleSig = '';
+  let lastUrl = location.href;
 
   // ── Platform ────────────────────────────────────────────────────────────────
   function detectPlatform() {
@@ -28,12 +36,18 @@
   init();
 
   function init() {
+    injectHighlightStyle();
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       handleMessage(msg).then(sendResponse);
       return true; // async
     });
     startObserver();
+    bindScrollSync();
+    window.addEventListener('resize', scheduleViewportSync, { passive: true });
+    startStatePolling();
     sendToPanel({ type: 'PAGE_READY', platform: PLATFORM, url: location.href });
+    syncStateToPanel(true);
+    scheduleViewportSync();
   }
 
   // ── Message handler ──────────────────────────────────────────────────────────
@@ -55,6 +69,16 @@
   // ── Send to sidepanel (via background) ───────────────────────────────────────
   function sendToPanel(msg) {
     chrome.runtime.sendMessage(msg).catch(() => {});
+  }
+
+function makePathEntry(turn) {
+  return {
+      id: turn.id || makeNodeId(turn.turnIndex, turn.branchIndex, turn.domId),
+      turnIndex: turn.turnIndex,
+      branchIndex: turn.branchIndex,
+      role: turn.role,
+      textSig: textSignature(turn.text),
+    };
   }
 
   // ── CANCEL command ────────────────────────────────────────────────────────────
@@ -117,12 +141,16 @@
     }
     const leaf = path[path.length - 1];
     if (leaf) {
-      const turns = readRawTurns();
-      const t     = turns[leaf.turnIndex];
-      if (t?.article) t.article.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      sendToPanel({ type: 'CONVERSATION_LOADING' });
+      const stableTurn = await waitForTurnStable(leaf.turnIndex, leaf.branchIndex);
+      if (stableTurn?.article) {
+        scrollToTurn(stableTurn.article);
+        highlightTurn(stableTurn.article);
+      }
     }
     const activePath = readCurrentPath();
     sendToPanel({ type: 'NAV_DONE', activePath });
+    scheduleViewportSync();
     return { ok: true, activePath };
   }
 
@@ -420,15 +448,12 @@
   }
 
   function readCurrentPath() {
-    return readRawTurns().map(t => ({
-      id:          makeNodeId(t.turnIndex, t.branchIndex, t.domId),
-      turnIndex:   t.turnIndex,
-      branchIndex: t.branchIndex,
-    }));
+    return readRawTurns().map(makePathEntry);
   }
 
   function serializeTurns(turns) {
     return turns.map(t => ({
+      id: makeNodeId(t.turnIndex, t.branchIndex, t.domId),
       turnIndex: t.turnIndex, role: t.role, text: t.text,
       branchIndex: t.branchIndex, branchTotal: t.branchTotal,
     }));
@@ -444,6 +469,10 @@
     const clone = el.cloneNode(true);
     clone.querySelectorAll('button,svg,nav,[role="toolbar"],[role="group"]').forEach(e => e.remove());
     return (clone.innerText || clone.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 220);
+  }
+
+  function textSignature(text) {
+    return String(text || '').trim().replace(/\s+/g, ' ').slice(0, 80);
   }
 
   // ── Storage persistence ───────────────────────────────────────────────────────
@@ -470,15 +499,159 @@
   // ── MutationObserver ──────────────────────────────────────────────────────────
   function startObserver() {
     observer?.disconnect();
+    bindScrollSync();
     observer = new MutationObserver(() => {
       if (building) return;
       clearTimeout(mutTimer);
       mutTimer = setTimeout(() => {
-        sendToPanel({ type: 'ACTIVE_PATH', activePath: readCurrentPath() });
+        syncStateToPanel(true);
+        scheduleViewportSync();
       }, DEBOUNCE_MS);
     });
     const target = document.querySelector('main') || document.body;
     observer.observe(target, { childList: true, subtree: true });
+  }
+
+  function scheduleViewportSync() {
+    clearTimeout(viewportTimer);
+    viewportTimer = setTimeout(() => {
+      const visiblePath = readVisiblePath();
+      const sig = JSON.stringify(visiblePath.map(p => p.id));
+      if (sig !== lastVisibleSig) {
+        lastVisibleSig = sig;
+        sendToPanel({ type: 'VISIBLE_RANGE', visiblePath });
+      }
+    }, VIEWPORT_SYNC_MS);
+  }
+
+  function syncStateToPanel(force = false) {
+    const turns = serializeTurns(readRawTurns());
+    const activePath = turns.map(makePathEntry);
+    const sig = JSON.stringify(turns.map(t => `${t.id}:${t.branchTotal}:${textSignature(t.text)}`));
+    if (!force && sig === lastStateSig) return;
+    lastStateSig = sig;
+    sendToPanel({ type: 'STATE_SYNC', turns, activePath });
+  }
+
+  function startStatePolling() {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(() => {
+      if (building) return;
+      if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        lastStateSig = '';
+        lastVisibleSig = '';
+        sendToPanel({ type: 'PAGE_READY', platform: PLATFORM, url: location.href });
+        syncStateToPanel(true);
+      }
+      bindScrollSync();
+      syncStateToPanel(false);
+      scheduleViewportSync();
+    }, 350);
+  }
+
+  function readVisiblePath() {
+    const host = getScrollHost();
+    const hostRect = host === window ? { top: 0, bottom: window.innerHeight } : host.getBoundingClientRect();
+    const viewportTop = hostRect.top;
+    const viewportBottom = hostRect.bottom;
+    return readRawTurns()
+      .filter(t => {
+        const rect = t.article?.getBoundingClientRect();
+        if (!rect) return false;
+        const visibleTop = Math.max(viewportTop, rect.top);
+        const visibleBottom = Math.min(viewportBottom, rect.bottom);
+        const overlap = visibleBottom - visibleTop;
+        return overlap > Math.min(60, rect.height * 0.28);
+      })
+      .map(makePathEntry);
+  }
+
+  async function waitForTurnStable(turnIndex, branchIndex) {
+    let stableCount = 0;
+    let lastSig = '';
+    for (let i = 0; i < 14; i++) {
+      const turn = readRawTurns()[turnIndex];
+      const sig = turn ? `${turn.branchIndex}:${turn.domId || ''}:${(turn.text || '').slice(0, 32)}` : '';
+      if (turn && turn.branchIndex === branchIndex && sig === lastSig) {
+        stableCount += 1;
+        if (stableCount >= 2) return turn;
+      } else {
+        stableCount = turn && turn.branchIndex === branchIndex ? 1 : 0;
+        lastSig = sig;
+      }
+      await sleep(120);
+    }
+    return readRawTurns()[turnIndex] || null;
+  }
+
+  function scrollToTurn(article) {
+    const host = getScrollHost();
+    const anchor = article.querySelector('[data-message-id]') || article;
+    const rect = anchor.getBoundingClientRect();
+    if (host === window) {
+      const targetTop = window.scrollY + rect.top - Math.max(72, Math.round(window.innerHeight * 0.22));
+      window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+      return;
+    }
+    const hostRect = host.getBoundingClientRect();
+    const targetTop = host.scrollTop + (rect.top - hostRect.top) - Math.max(48, Math.round(host.clientHeight * 0.18));
+    host.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+  }
+
+  function injectHighlightStyle() {
+    if (document.getElementById('cbv-nav-highlight-style')) return;
+    const style = document.createElement('style');
+    style.id = 'cbv-nav-highlight-style';
+    style.textContent = `
+      .cbv-nav-highlight {
+        position: relative;
+        outline: 2px solid rgba(35, 131, 226, 0.9);
+        outline-offset: 4px;
+        border-radius: 12px;
+        box-shadow: 0 0 0 8px rgba(35, 131, 226, 0.12);
+        animation: cbv-nav-pulse 1.2s ease-out 1;
+      }
+      @keyframes cbv-nav-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(35, 131, 226, 0.28); }
+        100% { box-shadow: 0 0 0 10px rgba(35, 131, 226, 0.0); }
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function highlightTurn(article) {
+    if (highlightedTurn && highlightedTurn !== article) {
+      highlightedTurn.classList.remove('cbv-nav-highlight');
+    }
+    highlightedTurn = article;
+    article.classList.remove('cbv-nav-highlight');
+    void article.offsetWidth;
+    article.classList.add('cbv-nav-highlight');
+    setTimeout(() => {
+      if (highlightedTurn === article) article.classList.remove('cbv-nav-highlight');
+    }, 1800);
+  }
+
+  function bindScrollSync() {
+    const nextHost = getScrollHost();
+    if (scrollHost === nextHost) return;
+    if (scrollHost && scrollHost !== window) scrollHost.removeEventListener('scroll', scheduleViewportSync);
+    window.removeEventListener('scroll', scheduleViewportSync);
+    scrollHost = nextHost;
+    if (scrollHost === window) window.addEventListener('scroll', scheduleViewportSync, { passive: true });
+    else scrollHost.addEventListener('scroll', scheduleViewportSync, { passive: true });
+  }
+
+  function getScrollHost() {
+    const sample = readRawTurns()[0]?.article || document.querySelector('main') || document.body;
+    let node = sample;
+    while (node && node !== document.body && node !== document.documentElement) {
+      const style = getComputedStyle(node);
+      if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 20) return node;
+      node = node.parentElement;
+    }
+    return window;
   }
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

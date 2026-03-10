@@ -26,11 +26,23 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 // content.js  → background → sidepanel  (content sends tree data / nav results)
 // sidepanel   → background → content    (sidepanel sends nav commands)
 
-// Keep track of which port is the sidepanel for a given tab
-const sidepanelPorts = new Map(); // tabId → port
+// Keep track of UI ports (sidepanel/viewer) for a given tab
+const uiPorts = new Map(); // tabId -> Set<port>
+
+function addUiPort(tabId, port) {
+  if (!uiPorts.has(tabId)) uiPorts.set(tabId, new Set());
+  uiPorts.get(tabId).add(port);
+}
+
+function removeUiPort(tabId, port) {
+  const set = uiPorts.get(tabId);
+  if (!set) return;
+  set.delete(port);
+  if (!set.size) uiPorts.delete(tabId);
+}
 
 chrome.runtime.onConnect.addListener(port => {
-  if (port.name !== 'cbv-sidepanel') return;
+  if (port.name !== 'cbv-sidepanel' && port.name !== 'cbv-viewer') return;
 
   // Figure out which tab this sidepanel belongs to
   // (sidePanel port doesn't expose tabId directly — we ask the panel to send it)
@@ -39,7 +51,7 @@ chrome.runtime.onConnect.addListener(port => {
   port.onMessage.addListener(async msg => {
     if (msg.type === 'REGISTER') {
       tabId = msg.tabId;
-      sidepanelPorts.set(tabId, port);
+      addUiPort(tabId, port);
       return;
     }
 
@@ -50,19 +62,21 @@ chrome.runtime.onConnect.addListener(port => {
   });
 
   port.onDisconnect.addListener(() => {
-    if (tabId) sidepanelPorts.delete(tabId);
+    if (tabId) removeUiPort(tabId, port);
   });
 });
 
-// content.js → background → sidepanel
+// content.js → background → UI clients
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab?.id;
   if (!tabId) return;
 
-  // Forward to sidepanel if connected
-  const port = sidepanelPorts.get(tabId);
-  if (port) {
-    try { port.postMessage({ ...msg, tabId }); } catch (_) {}
+  // Forward to all registered UIs for this tab
+  const ports = uiPorts.get(tabId);
+  if (ports) {
+    for (const port of ports) {
+      try { port.postMessage({ ...msg, tabId }); } catch (_) {}
+    }
   }
 
   // Always ACK

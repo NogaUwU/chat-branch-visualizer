@@ -1,8 +1,7 @@
-// sidepanel.js
+// viewer.js
 'use strict';
 
-// ── State ─────────────────────────────────────────────────────────────────────
-let treeNodes  = new Map();
+let treeNodes = new Map();
 let activePath = new Set();
 let activePathKeys = new Set();
 let activePathSigs = new Set();
@@ -19,39 +18,35 @@ let treeLoadingTimer = null;
 let currentTabId = null;
 let currentPageUrl = '';
 
-// ── Camera ────────────────────────────────────────────────────────────────────
 let cam = { x: 20, y: 20, scale: 1 };
-let isPanning  = false;
-let panStart   = { x: 0, y: 0, cx: 0, cy: 0 };
-let lastPinch  = null;
+let isPanning = false;
+let panStart = { x: 0, y: 0, cx: 0, cy: 0 };
+let lastPinch = null;
 let gestureBaseScale = null;
 let gestureCenter = null;
-let resizeTimer = null;
-// Fix 2: rAF throttle
 let rafPending = false;
+let resizeTimer = null;
 
-// ── Layout constants ───────────────────────────────────────────────────────────
-// Card mode (default): rounded-rect cards with text preview
-const CARD_NW   = 148;
-const CARD_NH   = 54;
-const CARD_HGAP = 14;
-const CARD_VGAP = 48;
-// Compact mode: single-line pill nodes
-const PILL_NW   = 120;
-const PILL_NH   = 26;
-const PILL_HGAP = 10;
-const PILL_VGAP = 34;
-// Mini mode: for fit-all on very dense trees
-const MINI_NW   = 74;
-const MINI_NH   = 18;
-const MINI_HGAP = 8;
-const MINI_VGAP = 24;
+// Card mode
+const CARD_NW   = 220;
+const CARD_NH   = 72;
+const CARD_HGAP = 20;
+const CARD_VGAP = 60;
+// Compact pill mode
+const PILL_NW   = 160;
+const PILL_NH   = 28;
+const PILL_HGAP = 12;
+const PILL_VGAP = 38;
+// Mini mode for dense fit-all views
+const MINI_NW   = 96;
+const MINI_NH   = 20;
+const MINI_HGAP = 10;
+const MINI_VGAP = 28;
 
 const PAD      = 24;
 const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 5;
 
-// ── Node display mode ─────────────────────────────────────────────────────────
 let compactMode = false;
 let autoNodeMode = 'card';
 compactMode = true;
@@ -82,24 +77,20 @@ function V_GAP() {
   return mode === 'mini' ? MINI_VGAP : mode === 'compact' ? PILL_VGAP : CARD_VGAP;
 }
 
-// Fix 4: module-scope layout map (shared by renderTree + minimap + panToNode)
-let layoutMap = new Map();   // nodeId → { x, y, w }
+let layoutMap = new Map();
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
 (async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  currentTabId = tab?.id ?? null;
-  currentPageUrl = tab?.url || '';
+  const params = new URLSearchParams(location.search);
+  currentTabId = Number(params.get('tabId')) || null;
+  currentPageUrl = params.get('src') || '';
 
-  const port = chrome.runtime.connect({ name: 'cbv-sidepanel' });
+  const port = chrome.runtime.connect({ name: 'cbv-viewer' });
   port.postMessage({ type: 'REGISTER', tabId: currentTabId });
   port.onMessage.addListener(onContentMessage);
 
   document.getElementById('btn-build').addEventListener('click', maybeStartBuild);
-  document.getElementById('btn-cancel').addEventListener('click', () =>
-    { sendToContent({ type: 'CANCEL' }); });
+  document.getElementById('btn-cancel').addEventListener('click', () => { sendToContent({ type: 'CANCEL' }); });
   document.getElementById('btn-fit').addEventListener('click', fitView);
-  document.getElementById('btn-viewer').addEventListener('click', openStandaloneViewer);
   document.getElementById('btn-expand-toggle').addEventListener('click', toggleExpandCollapseAll);
   document.getElementById('btn-dismiss-partial-banner').addEventListener('click', dismissPartialBanner);
   document.getElementById('btn-build-cancel').addEventListener('click', closeBuildModal);
@@ -110,38 +101,17 @@ let layoutMap = new Map();   // nodeId → { x, y, w }
 
   initInteraction();
   syncZoomSlider();
+  await restoreFromStorage();
   sendToContent({ type: 'QUICK_SCAN' });
-
 })();
 
-// ── Messaging ─────────────────────────────────────────────────────────────────
 function sendToContent(msg) {
   if (!currentTabId) return;
   chrome.tabs.sendMessage(currentTabId, msg).then(handleDirectResponse).catch(() => {});
 }
 
-async function openStandaloneViewer() {
-  if (!currentTabId) return;
-  let sourceUrl = currentPageUrl;
-  if (!sourceUrl) {
-    try {
-      const tab = await chrome.tabs.get(currentTabId);
-      sourceUrl = tab?.url || '';
-    } catch (_) {}
-  }
-
-  const url = new URL(chrome.runtime.getURL('viewer.html'));
-  url.searchParams.set('tabId', String(currentTabId));
-  if (sourceUrl) url.searchParams.set('src', sourceUrl);
-  await chrome.tabs.create({ url: url.toString() });
-
-  try {
-    if (chrome.sidePanel?.close) {
-      await chrome.sidePanel.close({ tabId: currentTabId });
-    } else {
-      window.close();
-    }
-  } catch (_) {}
+function handleDirectResponse(msg) {
+  if (msg?.type) onContentMessage(msg);
 }
 
 function onContentMessage(msg) {
@@ -150,13 +120,12 @@ function onContentMessage(msg) {
       if (msg.url && msg.url !== currentPageUrl) {
         currentPageUrl = msg.url;
         resetTreeState();
+        restoreFromStorage();
       } else {
         currentPageUrl = msg.url || currentPageUrl;
       }
       setStatus(`Connected — ${msg.platform}`, 'ok');
-      sendToContent({ type: 'QUICK_SCAN' });
       break;
-
     case 'SCAN_RESULT':
       msg.turns = sanitizeTurns(msg.turns);
       mergeTurnsIntoTree(msg.turns);
@@ -171,25 +140,28 @@ function onContentMessage(msg) {
       setVisiblePathState([]);
       renderTree();
       break;
-
     case 'BUILD_START':
-      treeNodes.clear(); activePath.clear(); activePathKeys.clear(); visiblePath.clear(); visiblePathKeys.clear(); expandedChainStarts.clear();
+      treeNodes.clear();
+      activePath.clear();
+      activePathKeys.clear();
+      visiblePath.clear();
+      visiblePathKeys.clear();
+      expandedChainStarts.clear();
       setTreeCompleteness('building');
-      setProgress(0); showProgress();
+      setProgress(0);
+      showProgress();
       showTreeLoading('Building full tree…', 'ChatGPT may switch branches while history is collected', 'build');
       setStatus('Building tree…', 'working');
       setBuildBusy();
       break;
-
     case 'BUILD_PROGRESS': {
       const pct = Math.min(99, Math.round((msg.turnIdx / Math.max(msg.turnCount, 1)) * 100));
       setProgress(pct);
       setStatus(`Scanning turn ${msg.turnIdx + 1}/${msg.turnCount} · ${msg.nodeCount} nodes`, 'working');
       break;
     }
-
     case 'BUILD_DONE':
-      treeNodes   = new Map(msg.nodes.map(n => [n.id, n]));
+      treeNodes = new Map(msg.nodes.map(n => [n.id, n]));
       setTreeCompleteness('full');
       setActivePathState(msg.activePath);
       setVisiblePathState([]);
@@ -201,35 +173,28 @@ function onContentMessage(msg) {
       collapseByDefault();
       requestAnimationFrame(fitView);
       break;
-
     case 'BUILD_ERROR':
       hideProgress();
       setBuildIdle();
       hideTreeLoading(true);
       setStatus(`Error: ${msg.message}`, 'error');
       break;
-
     case 'BUILD_CANCELLED':
       hideProgress();
       setBuildIdle();
       hideTreeLoading(true);
       setStatus('Build cancelled', 'idle');
       break;
-
     case 'BUILD_WARNING':
-      // Non-fatal: show warning in status but keep building
       setStatus(`Warning: ${msg.message}`, 'working');
       break;
-
     case 'NAV_DONE':
     case 'ACTIVE_PATH':
       setActivePathState(msg.activePath);
       hideTreeLoading(true);
       renderTree();
-      // Fix 4: jump camera to active leaf after nav
       requestAnimationFrame(panToActiveLeaf);
       break;
-
     case 'VISIBLE_RANGE':
       setVisiblePathState(sanitizeTurns(msg.visiblePath));
       if (treeLoadingMode !== 'build') hideTreeLoading(false);
@@ -252,11 +217,6 @@ function onContentMessage(msg) {
   }
 }
 
-function handleDirectResponse(msg) {
-  if (msg?.type) onContentMessage(msg);
-}
-
-// ── Navigate ──────────────────────────────────────────────────────────────────
 function navigateTo(nodeId) {
   const node = treeNodes.get(nodeId);
   if (!node) return;
@@ -646,16 +606,14 @@ function buildDisplayGraph() {
   return { nodes, roots, expandedGroups };
 }
 
-// ── Render ────────────────────────────────────────────────────────────────────
 function renderTree() {
   const container = document.getElementById('cbv-tree');
   if (!container) return;
-
   const emptyEl = document.getElementById('cbv-empty');
+
   if (treeNodes.size === 0) {
     if (emptyEl) emptyEl.style.display = '';
-    const old = document.getElementById('cbv-canvas');
-    if (old) old.remove();
+    document.getElementById('cbv-canvas')?.remove();
     layoutMap.clear();
     renderedNodes.clear();
     renderedExpandedGroups = [];
@@ -664,27 +622,26 @@ function renderTree() {
   }
   if (emptyEl) emptyEl.style.display = 'none';
 
-  // ── CSS token reads (theme-aware) ───────────────────────────────────────
   const C = {
-    nodeFillU:         cssVar('--node-fill-u'),
-    nodeFillA:         cssVar('--node-fill-a'),
-    nodeFillActiveU:   cssVar('--node-fill-active-u'),
-    nodeFillActiveA:   cssVar('--node-fill-active-a'),
-    nodeStroke:        cssVar('--node-stroke'),
+    nodeFillU: cssVar('--node-fill-u'),
+    nodeFillA: cssVar('--node-fill-a'),
+    nodeFillActiveU: cssVar('--node-fill-active-u'),
+    nodeFillActiveA: cssVar('--node-fill-active-a'),
+    nodeStroke: cssVar('--node-stroke'),
     nodeStrokeActiveU: cssVar('--node-stroke-active-u'),
     nodeStrokeActiveA: cssVar('--node-stroke-active-a'),
-    nodeTx:            cssVar('--node-tx'),
-    nodeTxMuted:       cssVar('--node-tx-muted'),
-    tagBgU:            cssVar('--bg-tag-u'),
-    tagBgA:            cssVar('--bg-tag-a'),
-    tagTxU:            cssVar('--tx-tag-u'),
-    tagTxA:            cssVar('--tx-tag-a'),
-    badgeBg:           cssVar('--bg-badge'),
-    badgeTx:           cssVar('--tx-badge'),
-    edge:              cssVar('--edge-color'),
-    edgeActiveU:       cssVar('--edge-active-u'),
-    edgeActiveA:       cssVar('--edge-active-a'),
-    visible:           '#d4a017',
+    nodeTx: cssVar('--node-tx'),
+    nodeTxMuted: cssVar('--node-tx-muted'),
+    tagBgU: cssVar('--bg-tag-u'),
+    tagBgA: cssVar('--bg-tag-a'),
+    tagTxU: cssVar('--tx-tag-u'),
+    tagTxA: cssVar('--tx-tag-a'),
+    badgeBg: cssVar('--bg-badge'),
+    badgeTx: cssVar('--tx-badge'),
+    edge: cssVar('--edge-color'),
+    edgeActiveU: cssVar('--edge-active-u'),
+    edgeActiveA: cssVar('--edge-active-a'),
+    visible: '#d4a017',
   };
 
   const graph = buildDisplayGraph();
@@ -692,8 +649,6 @@ function renderTree() {
   const roots = graph.roots.map(id => renderNodes.get(id)).filter(Boolean);
   renderedNodes = renderNodes;
   renderedExpandedGroups = graph.expandedGroups || [];
-
-  // ── 2. Layout into module-scope layoutMap ─────────────────────────────────
   layoutMap.clear();
 
   const mode = getNodeMode();
@@ -703,7 +658,10 @@ function renderTree() {
     const n = renderNodes.get(id);
     if (!n) return nw;
     const kids = n.children.map(c => renderNodes.get(c)).filter(Boolean);
-    if (!kids.length) { layoutMap.set(id, { w: nw }); return nw; }
+    if (!kids.length) {
+      layoutMap.set(id, { w: nw });
+      return nw;
+    }
     let total = kids.reduce((s, k, i) => s + subtreeW(k.id) + (i > 0 ? hgap : 0), 0);
     total = Math.max(total, nw);
     layoutMap.set(id, { w: total });
@@ -726,45 +684,42 @@ function renderTree() {
     });
   }
 
-  let c = PAD;
+  let cursor = PAD;
   roots.forEach((r, i) => {
     subtreeW(r.id);
-    if (i > 0) c += hgap * 2;
-    assign(r.id, c, 0);
-    c += layoutMap.get(r.id)?.w ?? nw;
+    if (i > 0) cursor += hgap * 2;
+    assign(r.id, cursor, 0);
+    cursor += layoutMap.get(r.id)?.w ?? nw;
   });
 
-  // ── 3. Canvas bounds ──────────────────────────────────────────────────────
-  let maxX = 0, maxY = 0;
+  let maxX = 0;
+  let maxY = 0;
   layoutMap.forEach(({ x, y }) => {
     maxX = Math.max(maxX, x + nw / 2 + PAD);
     maxY = Math.max(maxY, y + nh + PAD);
   });
 
-  // ── 4. Build SVG ──────────────────────────────────────────────────────────
-  const NS  = 'http://www.w3.org/2000/svg';
+  const NS = 'http://www.w3.org/2000/svg';
   const svg = el(NS, 'svg', { width: maxX, height: maxY });
 
-  // Edges
   const edgeG = el(NS, 'g');
   renderNodes.forEach(node => {
     const pi = layoutMap.get(node.id);
     if (!pi) return;
     node.children.forEach(cid => {
       const child = renderNodes.get(cid);
-      const ci    = layoutMap.get(cid);
+      const ci = layoutMap.get(cid);
       if (!ci || !child) return;
-      // Connect bottom-center of parent to top-center of child
       const x1 = pi.x, y1 = pi.y + nh, x2 = ci.x, y2 = ci.y;
       const my = (y1 + y2) / 2;
-      const both   = isNodeOnActivePath(node) && isNodeOnActivePath(child);
+      const both = isNodeOnActivePath(node) && isNodeOnActivePath(child);
       const bothVisible = isNodeVisible(node) && isNodeVisible(child);
       const isUser = child.role === 'user';
       edgeG.appendChild(el(NS, 'path', {
         d: `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`,
         fill: 'none',
         stroke: both ? (isUser ? C.edgeActiveU : C.edgeActiveA) : bothVisible ? C.visible : C.edge,
-        'stroke-width': both ? '2.4' : bothVisible ? '1.9' : '1.5',
+        'stroke-width': both ? '2.6' : bothVisible ? '2' : '1.5',
         'stroke-linecap': 'round',
         opacity: both ? '1' : bothVisible ? '0.98' : '0.72',
       }));
@@ -778,37 +733,37 @@ function renderTree() {
     if (infos.length < 2) return;
     const top = infos[0].y;
     const bottom = infos[infos.length - 1].y + nh;
-    const left = Math.min(...infos.map(info => info.x - nw / 2)) - 16;
+    const left = Math.min(...infos.map(info => info.x - nw / 2)) - 20;
     const mid = (top + bottom) / 2;
     const visible = group.chainIds.some(id => isNodeVisible(treeNodes.get(id)));
     const stroke = visible ? C.visible : cssVar('--node-stroke');
-    const hook = 12;
+    const hook = 14;
 
     braceG.appendChild(el(NS, 'path', {
-      d: `M${left + 10},${top} Q${left},${top} ${left},${top + hook} L${left},${bottom - hook} Q${left},${bottom} ${left + 10},${bottom}`,
+      d: `M${left + 12},${top} Q${left},${top} ${left},${top + hook} L${left},${bottom - hook} Q${left},${bottom} ${left + 12},${bottom}`,
       fill: 'none',
       stroke,
-      'stroke-width': '1.5',
+      'stroke-width': '1.7',
       'stroke-linecap': 'round',
       opacity: visible ? '0.95' : '0.78',
     }));
 
-    const bx = left + 3;
-    const by = top + 10;
+    const bx = left + 4;
+    const by = top + 12;
     const btn = el(NS, 'g', { class: 'node-g' });
     btn.appendChild(el(NS, 'circle', {
-      cx: bx, cy: by, r: '7',
+      cx: bx, cy: by, r: '8',
       fill: cssVar('--bg-app'),
       stroke,
       'stroke-width': '1.2',
     }));
     btn.appendChild(svgText(bx, by + 0.5, '−', {
       fill: stroke,
-      'font-size': '11', 'font-weight': '700',
+      'font-size': '12', 'font-weight': '700',
       'text-anchor': 'middle', 'dominant-baseline': 'middle',
       'font-family': 'ui-monospace, monospace',
     }));
-    const hit = el(NS, 'circle', { cx: bx, cy: by, r: '10', fill: 'transparent' });
+    const hit = el(NS, 'circle', { cx: bx, cy: by, r: '11', fill: 'transparent' });
     hit.style.cursor = 'pointer';
     hit.addEventListener('click', () => toggleChainExpansion(group.startId));
     btn.appendChild(hit);
@@ -816,7 +771,6 @@ function renderTree() {
   });
   svg.appendChild(braceG);
 
-  // Nodes
   const nodeG = el(NS, 'g');
   renderNodes.forEach(node => {
     const info = layoutMap.get(node.id);
@@ -827,7 +781,6 @@ function renderTree() {
     const isVisible = isNodeVisible(node);
     const isUser   = node.role === 'user';
     const badgeKind = isCluster ? 'cluster' : isUser ? 'user' : assistantBrand();
-    // Top-left corner of node rect
     const nx = info.x - nw / 2;
     const ny = info.y;
     const accentColor = isCluster ? C.nodeStroke : (isUser ? C.edgeActiveU : C.edgeActiveA);
@@ -844,7 +797,7 @@ function renderTree() {
     const visibleStroke = C.visible;
 
     if (mode === 'mini') {
-      const pr = 6;
+      const pr = 7;
       if (isVisible && !isActive) {
         g.appendChild(el(NS, 'rect', {
           x: nx - 2, y: ny - 2, width: nw + 4, height: nh + 4,
@@ -857,36 +810,36 @@ function renderTree() {
           class: 'cbv-visible-pulse',
           x: nx - 3, y: ny - 3, width: nw + 6, height: nh + 6,
           rx: pr + 3, ry: pr + 3,
-          fill: 'none', stroke: visibleStroke, 'stroke-width': isActive ? '1.5' : '1.25',
+          fill: 'none', stroke: visibleStroke, 'stroke-width': isActive ? '1.6' : '1.3',
         }));
       }
       const box = el(NS, 'rect', {
         class: 'node-box',
         x: nx, y: ny, width: nw, height: nh,
         rx: pr, ry: pr,
-        fill, stroke, 'stroke-width': isActive ? '1.25' : '1',
+        fill, stroke, 'stroke-width': isActive ? '1.3' : '1',
       });
       g.appendChild(box);
 
       g.appendChild(el(NS, 'rect', {
-        x: nx, y: ny, width: isActive ? 4 : 3, height: nh,
+        x: nx, y: ny, width: isActive ? 5 : 4, height: nh,
         rx: pr, ry: pr,
         fill: accentColor,
       }));
 
-      appendNodeBadge(g, nx + 13, ny + nh / 2, badgeKind, isActive);
+      appendNodeBadge(g, nx + 15, ny + nh / 2, badgeKind, isActive);
 
-      g.appendChild(svgText(nx + 24, ny + nh / 2 + 0.5, isCluster ? `+${node.count}` : `${node.turnIndex + 1}`, {
+      g.appendChild(svgText(nx + 26, ny + nh / 2 + 0.5, isCluster ? `+${node.count}` : `${node.turnIndex + 1}`, {
         fill: isActive ? C.nodeTx : C.nodeTxMuted,
-        'font-size': '8', 'font-weight': '700',
+        'font-size': '9', 'font-weight': '700',
         'dominant-baseline': 'middle',
         'font-family': 'ui-monospace, monospace',
       }));
 
       if (!isCluster && node.branchTotal > 1) {
-        g.appendChild(svgText(nx + nw - 8, ny + nh / 2 + 0.5, `${node.branchIndex}`, {
+        g.appendChild(svgText(nx + nw - 10, ny + nh / 2 + 0.5, `${node.branchIndex}`, {
           fill: C.badgeTx,
-          'font-size': '8', 'font-weight': '700',
+          'font-size': '9', 'font-weight': '700',
           'text-anchor': 'middle', 'dominant-baseline': 'middle',
           'font-family': 'ui-monospace, monospace',
         }));
@@ -900,21 +853,19 @@ function renderTree() {
       hit.addEventListener('click', () => isCluster ? toggleChainExpansion(node.startId) : navigateTo(node.id));
       hit.addEventListener('mouseenter', () => {
         box.setAttribute('stroke', accentColor);
-        box.setAttribute('stroke-width', '1.75');
+        box.setAttribute('stroke-width', '1.8');
         showTooltip(node, info.x, ny);
       });
       hit.addEventListener('mouseleave', () => {
         box.setAttribute('stroke', stroke);
-        box.setAttribute('stroke-width', isActive ? '1.25' : '1');
+        box.setAttribute('stroke-width', isActive ? '1.3' : '1');
         hideTooltip();
       });
       g.appendChild(hit);
 
     } else if (mode === 'compact') {
-      // ── Compact pill mode ────────────────────────────────────────────────
-      const pr = nh / 2; // pill radius
-
-      // Glow for active
+      // ── Compact pill ──────────────────────────────────────────────────────
+      const pr = nh / 2;
       if (isActive) {
         g.appendChild(el(NS, 'rect', {
           x: nx - 2, y: ny - 2, width: nw + 4, height: nh + 4,
@@ -933,10 +884,9 @@ function renderTree() {
           class: 'cbv-visible-pulse',
           x: nx - 3, y: ny - 3, width: nw + 6, height: nh + 6,
           rx: pr + 3, ry: pr + 3,
-          fill: 'none', stroke: visibleStroke, 'stroke-width': isActive ? '1.7' : '1.35',
+          fill: 'none', stroke: visibleStroke, 'stroke-width': isActive ? '1.8' : '1.4',
         }));
       }
-
       const box = el(NS, 'rect', {
         class: 'node-box',
         x: nx, y: ny, width: nw, height: nh,
@@ -944,44 +894,35 @@ function renderTree() {
         fill, stroke, 'stroke-width': isActive ? '1.5' : '1',
       });
       g.appendChild(box);
-
-      // Dot indicator
       appendNodeBadge(g, nx + 14, ny + nh / 2, badgeKind, isActive);
-
-      // Role + Turn label
       const turnLabel = isCluster ? `+${node.count}` : `${node.turnIndex + 1}`;
       g.appendChild(svgText(nx + 26, ny + nh / 2 + 0.5, turnLabel, {
         fill: isActive ? C.nodeTx : C.nodeTxMuted,
-        'font-size': '9', 'font-weight': '700',
+        'font-size': '10', 'font-weight': '700',
         'dominant-baseline': 'middle',
         'font-family': 'ui-monospace, monospace',
       }));
-
-      // Text snippet (truncated to fit remaining width)
-      const snippetX = nx + 42;
-      const snippet = truncateToWidth(node.text || '', isCluster ? 10 : 14);
+      const snippet = truncateToWidth(node.text || '', isCluster ? 14 : 18);
       if (snippet) {
         const snippetClipId = `pill-clip-${node.id.replace(/[^a-z0-9]/gi, '')}`;
         const defs = el(NS, 'defs');
         const clipPath = el(NS, 'clipPath', { id: snippetClipId });
         clipPath.appendChild(el(NS, 'rect', {
-          x: snippetX, y: ny + 4, width: nw - 46, height: nh - 8,
+          x: nx + 46, y: ny + 4, width: nw - 52, height: nh - 8,
           rx: pr - 2, ry: pr - 2,
         }));
         defs.appendChild(clipPath);
         g.appendChild(defs);
 
-        const snippetText = svgText(snippetX, ny + nh / 2 + 0.5, snippet, {
+        const snippetText = svgText(nx + 50, ny + nh / 2 + 0.5, snippet, {
           fill: C.nodeTxMuted,
-          'font-size': '9',
+          'font-size': '10',
           'dominant-baseline': 'middle',
           'font-family': 'ui-sans-serif, system-ui, sans-serif',
           'clip-path': `url(#${snippetClipId})`,
         });
         g.appendChild(snippetText);
       }
-
-      // Hit area
       const hit = el(NS, 'rect', {
         x: nx - 4, y: ny - 4, width: nw + 8, height: nh + 8,
         rx: pr + 4, ry: pr + 4, fill: 'transparent',
@@ -1001,9 +942,9 @@ function renderTree() {
       g.appendChild(hit);
 
     } else {
-      // ── Card mode ────────────────────────────────────────────────────────
-      const rx = 8;
-      const accentBarW = isActive ? 4 : 3;
+      // ── Card mode ─────────────────────────────────────────────────────────
+      const rx = 10;
+      const accentBarW = isActive ? 5 : 4;
 
       if (isVisible && !isActive) {
         g.appendChild(el(NS, 'rect', {
@@ -1017,19 +958,18 @@ function renderTree() {
           class: 'cbv-visible-pulse',
           x: nx - 3, y: ny - 3, width: nw + 6, height: nh + 6,
           rx: rx + 2, ry: rx + 2,
-          fill: 'none', stroke: visibleStroke, 'stroke-width': isActive ? '1.8' : '1.4',
+          fill: 'none', stroke: visibleStroke, 'stroke-width': isActive ? '1.9' : '1.45',
         }));
       }
 
       // Drop shadow
       g.appendChild(el(NS, 'rect', {
-        x: nx + 2, y: ny + 3, width: nw, height: nh,
+        x: nx + 2, y: ny + 4, width: nw, height: nh,
         rx, ry: rx,
         fill: '#000', opacity: isActive ? '0.10' : '0.05',
-        style: 'filter:blur(4px)',
+        style: 'filter:blur(5px)',
       }));
 
-      // Card body
       const box = el(NS, 'rect', {
         class: 'node-box',
         x: nx, y: ny, width: nw, height: nh,
@@ -1038,7 +978,7 @@ function renderTree() {
       });
       g.appendChild(box);
 
-      // Left accent bar (clip to card shape)
+      // Left accent bar
       const barClipId = `bar-clip-${node.id.replace(/[^a-z0-9]/gi, '')}`;
       const defs = el(NS, 'defs');
       const clipPath = el(NS, 'clipPath', { id: barClipId });
@@ -1047,91 +987,85 @@ function renderTree() {
       }));
       defs.appendChild(clipPath);
       g.appendChild(defs);
-
       g.appendChild(el(NS, 'rect', {
         x: nx, y: ny, width: accentBarW, height: nh,
         fill: accentColor,
         'clip-path': `url(#${barClipId})`,
       }));
 
-      // ── Kicker row (role dot + role name + turn + branch badge) ──────────
-      const kickerY = ny + 15;
-      const textX   = nx + accentBarW + 8;
+      // Kicker row
+      const kickerY = ny + 18;
+      const textX   = nx + accentBarW + 10;
 
-      // Role dot
       appendNodeBadge(g, textX + 1, kickerY - 1, badgeKind, isActive);
 
-      // Role label
       const roleLabel = isCluster ? 'Collapsed' : (isUser ? 'User' : (assistantBrand() === 'claude' ? 'Claude' : 'ChatGPT'));
-      g.appendChild(svgText(textX + 12, kickerY, roleLabel, {
+      g.appendChild(svgText(textX + 13, kickerY, roleLabel, {
         fill: C.nodeTxMuted,
-        'font-size': '9', 'font-weight': '700',
+        'font-size': '10', 'font-weight': '700',
         'dominant-baseline': 'middle',
         'font-family': 'ui-monospace, monospace',
-        'letter-spacing': '0.03em',
+        'letter-spacing': '0.02em',
       }));
 
-      // Turn number
-      const turnStr = isCluster ? `+${node.count}` : `T${node.turnIndex + 1}`;
-      g.appendChild(svgText(textX + 56, kickerY, turnStr, {
+      g.appendChild(svgText(textX + 64, kickerY, isCluster ? `+${node.count}` : `T${node.turnIndex + 1}`, {
         fill: C.nodeTxMuted,
-        'font-size': '9', 'font-weight': '600',
+        'font-size': '10', 'font-weight': '600',
         'dominant-baseline': 'middle',
         'font-family': 'ui-monospace, monospace',
       }));
 
-      // Branch badge (only when branching)
+      // Branch badge
       if (!isCluster && node.branchTotal > 1) {
         const badgeLabel = `${node.branchIndex}/${node.branchTotal}`;
-        const badgeX = nx + nw - 6;
-        const badgeY = ny + 12;
-        const badgeW = badgeLabel.length <= 3 ? 20 : 26;
+        const badgeX = nx + nw - 8;
+        const badgeY = ny + 15;
+        const badgeW = badgeLabel.length <= 3 ? 22 : 28;
         g.appendChild(el(NS, 'rect', {
-          x: badgeX - badgeW, y: badgeY - 8, width: badgeW, height: 13,
-          rx: '4', ry: '4',
+          x: badgeX - badgeW, y: badgeY - 9, width: badgeW, height: 14,
+          rx: '5', ry: '5',
           fill: C.badgeBg,
         }));
         g.appendChild(svgText(badgeX - badgeW / 2, badgeY + 0.5, badgeLabel, {
           fill: C.badgeTx,
-          'font-size': '8', 'font-weight': '700',
+          'font-size': '9', 'font-weight': '700',
           'text-anchor': 'middle', 'dominant-baseline': 'middle',
           'font-family': 'ui-monospace, monospace',
         }));
       }
 
-      // ── Divider line ─────────────────────────────────────────────────────
+      // Divider
       g.appendChild(el(NS, 'line', {
-        x1: nx + accentBarW, y1: ny + 22, x2: nx + nw, y2: ny + 22,
+        x1: nx + accentBarW, y1: ny + 28, x2: nx + nw, y2: ny + 28,
         stroke: C.nodeStroke, 'stroke-width': '0.5',
       }));
 
-      // ── Text preview (1-2 lines) ─────────────────────────────────────────
+      // Text preview (2 lines)
       const previewX = textX;
-      const previewMaxW = nw - accentBarW - 14;
-      const previewLines = wrapSnippet(node.text || '', isCluster ? 1 : 2, Math.floor((previewMaxW - 2) / 6.2));
+      const previewMaxW = nw - accentBarW - 18;
+      const previewLines = wrapSnippet(node.text || '', isCluster ? 1 : 2, Math.floor((previewMaxW - 4) / 6.5));
       if (previewLines.length > 0 && previewLines[0]) {
         const previewClipId = `preview-clip-${node.id.replace(/[^a-z0-9]/gi, '')}`;
         const previewDefs = el(NS, 'defs');
         const clipPath = el(NS, 'clipPath', { id: previewClipId });
         clipPath.appendChild(el(NS, 'rect', {
-          x: previewX, y: ny + 26, width: nw - accentBarW - 12, height: nh - 28,
+          x: previewX, y: ny + 32, width: nw - accentBarW - 16, height: nh - 36,
           rx: 2, ry: 2,
         }));
         previewDefs.appendChild(clipPath);
         g.appendChild(previewDefs);
 
-        const previewText = svgMultilineText(previewX, ny + 33, previewLines, {
+        const previewText = svgMultilineText(previewX, ny + 38, previewLines, {
           fill: isActive ? C.nodeTx : C.nodeTxMuted,
-          'font-size': '10',
+          'font-size': '11',
           'dominant-baseline': 'hanging',
           'font-family': 'ui-sans-serif, system-ui, sans-serif',
           'clip-path': `url(#${previewClipId})`,
-        }, 12);
+        }, 14);
         g.appendChild(previewText);
       } else {
-        // Empty message placeholder
-        g.appendChild(svgText(previewX, ny + 33, '—', {
-          fill: C.nodeTxMuted, 'font-size': '10',
+        g.appendChild(svgText(previewX, ny + 38, '—', {
+          fill: C.nodeTxMuted, 'font-size': '11',
           'dominant-baseline': 'hanging',
           'font-family': 'ui-sans-serif, system-ui, sans-serif',
         }));
@@ -1161,7 +1095,6 @@ function renderTree() {
   });
   svg.appendChild(nodeG);
 
-  // ── 5. Mount ──────────────────────────────────────────────────────────────
   let canvas = document.getElementById('cbv-canvas');
   if (!canvas) {
     canvas = document.createElement('div');
@@ -1175,7 +1108,6 @@ function renderTree() {
   renderMinimap();
 }
 
-// ── Pan + Zoom ────────────────────────────────────────────────────────────────
 function initInteraction() {
   const tree = document.getElementById('cbv-tree');
 
@@ -1189,7 +1121,6 @@ function initInteraction() {
   function handleWheelGesture(e) {
     e.preventDefault();
     const p = localPoint(e);
-
     if (e.altKey || e.shiftKey) {
       const dx = e.deltaMode === 1 ? e.deltaX * 20 : e.deltaX;
       const dy = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaY;
@@ -1199,7 +1130,6 @@ function initInteraction() {
       renderMinimap();
       return;
     }
-
     const raw = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaY;
     const factor = Math.pow(1.01, -raw);
     zoomAt(p.x, p.y, factor);
@@ -1225,21 +1155,12 @@ function initInteraction() {
     gestureCenter = null;
   }
 
-  // ── Wheel / trackpad ──────────────────────────────────────────────────────
-  // Chrome sends wheel events for both trackpad scroll and pinch-to-zoom.
-  // Key distinction: pinch sets e.ctrlKey = true; two-finger scroll does not.
-  //
-  // Desired behaviour:
-  //   • Two-finger wheel / trackpad       → zoom centred on cursor
-  //   • Alt/Shift + wheel                 → pan
-  //   • Drag                             → pan
   window.addEventListener('wheel', handleWheelGesture, { passive: false, capture: true });
 
-  // ── Mouse drag pan ────────────────────────────────────────────────────────
   tree.addEventListener('mousedown', e => {
     if (e.button !== 0 || e.target.closest('.node-g')) return;
     isPanning = true;
-    panStart  = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y };
+    panStart = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y };
     tree.style.cursor = 'grabbing';
   });
   window.addEventListener('mousemove', e => {
@@ -1255,13 +1176,10 @@ function initInteraction() {
     tree.style.cursor = 'grab';
   });
 
-  // ── Touch (physical touchscreen, not trackpad) ────────────────────────────
-  // 1-finger → pan; 2-finger → pinch zoom.
-  // {passive:false} on touchstart/touchmove so we can call preventDefault.
   tree.addEventListener('touchstart', e => {
     if (e.touches.length === 1) {
       isPanning = true;
-      panStart  = { x: e.touches[0].clientX, y: e.touches[0].clientY, cx: cam.x, cy: cam.y };
+      panStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, cx: cam.x, cy: cam.y };
     } else if (e.touches.length === 2) {
       isPanning = false;
       lastPinch = pinchDist(e.touches);
@@ -1277,8 +1195,8 @@ function initInteraction() {
       renderMinimap();
     } else if (e.touches.length === 2 && lastPinch != null) {
       e.preventDefault();
-      const d  = pinchDist(e.touches);
-      const r  = tree.getBoundingClientRect();
+      const d = pinchDist(e.touches);
+      const r = tree.getBoundingClientRect();
       const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
       const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
       zoomAt(cx, cy, d / lastPinch);
@@ -1292,15 +1210,11 @@ function initInteraction() {
     lastPinch = null;
   }, { passive: true });
 
-  // macOS trackpad pinch fallback.
-  // Some Chrome/WebView surfaces emit gesture* events instead of wheel+ctrlKey.
   window.addEventListener('gesturestart', handleGestureStart, { passive: false, capture: true });
   window.addEventListener('gesturechange', handleGestureChange, { passive: false, capture: true });
   window.addEventListener('gestureend', handleGestureEnd, { passive: false, capture: true });
 
   tree.style.cursor = 'grab';
-
-  // ── Minimap click → pan to that region ───────────────────────────────────
   initMinimapClick();
 
   window.addEventListener('resize', () => {
@@ -1373,47 +1287,46 @@ function hideTooltip() {
 
 function zoomAt(px, py, factor) {
   const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, cam.scale * factor));
-  cam.x      = px - (px - cam.x) * (next / cam.scale);
-  cam.y      = py - (py - cam.y) * (next / cam.scale);
-  cam.scale  = next;
+  cam.x = px - (px - cam.x) * (next / cam.scale);
+  cam.y = py - (py - cam.y) * (next / cam.scale);
+  cam.scale = next;
   applyTransform();
   renderMinimap();
 }
 
 function zoomToAbsolute(px, py, absoluteScale) {
   const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, absoluteScale));
-  cam.x      = px - (px - cam.x) * (next / cam.scale);
-  cam.y      = py - (py - cam.y) * (next / cam.scale);
-  cam.scale  = next;
+  cam.x = px - (px - cam.x) * (next / cam.scale);
+  cam.y = py - (py - cam.y) * (next / cam.scale);
+  cam.scale = next;
   applyTransform();
   renderMinimap();
 }
 
-// Fix 2: rAF-throttled transform writes
 function applyTransform() {
   if (rafPending) return;
   rafPending = true;
   requestAnimationFrame(() => {
-    const c = document.getElementById('cbv-canvas');
-    if (c) c.style.transform = `translate(${cam.x}px,${cam.y}px) scale(${cam.scale})`;
+    const canvas = document.getElementById('cbv-canvas');
+    if (canvas) canvas.style.transform = `translate(${cam.x}px,${cam.y}px) scale(${cam.scale})`;
     syncZoomSlider();
     rafPending = false;
   });
 }
 
-// Fix 6: read SVG intrinsic size, not scrollWidth
 function fitView(animated = true) {
   const tree = document.getElementById('cbv-tree');
-  const svg  = document.querySelector('#cbv-canvas svg');
+  const svg = document.querySelector('#cbv-canvas svg');
   if (!tree || !svg) return;
-  const tw = tree.clientWidth, th = tree.clientHeight;
+  const tw = tree.clientWidth;
+  const th = tree.clientHeight;
   const cw = +svg.getAttribute('width');
   const ch = +svg.getAttribute('height');
   if (!cw || !ch) return;
 
   cam.scale = Math.min(1, (tw - PAD * 2) / cw, (th - PAD * 2) / ch) * 0.95;
-  cam.x     = (tw - cw * cam.scale) / 2;
-  cam.y     = (th - ch * cam.scale) / 2;
+  cam.x = (tw - cw * cam.scale) / 2;
+  cam.y = (th - ch * cam.scale) / 2;
   if (animated) {
     const canvas = document.getElementById('cbv-canvas');
     if (canvas) {
@@ -1428,9 +1341,7 @@ function fitView(animated = true) {
   renderMinimap();
 }
 
-// Fix 4: pan camera to center the active leaf node
 function panToActiveLeaf() {
-  // Find the deepest node that is active and has no active children
   let leaf = null;
   treeNodes.forEach(n => {
     if (!isNodeOnActivePath(n)) return;
@@ -1440,15 +1351,12 @@ function panToActiveLeaf() {
   if (!leaf) return;
 
   const info = layoutMap.get(leaf.id);
-  if (!info) return;
-
   const tree = document.getElementById('cbv-tree');
-  if (!tree) return;
-  const tw = tree.clientWidth, th = tree.clientHeight;
-
+  if (!info || !tree) return;
+  const tw = tree.clientWidth;
+  const th = tree.clientHeight;
   const targetX = tw / 2 - info.x * cam.scale;
   const targetY = th / 2 - (info.y + NH() / 2) * cam.scale;
-
   const canvas = document.getElementById('cbv-canvas');
   if (canvas) {
     canvas.style.transition = 'transform 0.4s cubic-bezier(0.4,0,0.2,1)';
@@ -1460,25 +1368,24 @@ function panToActiveLeaf() {
   }
 }
 
-// Fix 7: minimap
 function renderMinimap() {
   const mini = document.getElementById('cbv-minimap');
-  const svg  = document.querySelector('#cbv-canvas svg');
+  const svg = document.querySelector('#cbv-canvas svg');
   const tree = document.getElementById('cbv-tree');
   if (!mini || !svg || !tree || layoutMap.size === 0) return;
 
-  const ctx  = mini.getContext('2d');
-  const mw   = mini.width, mh = mini.height;
+  const ctx = mini.getContext('2d');
+  const mw = mini.width;
+  const mh = mini.height;
   const svgW = +svg.getAttribute('width');
   const svgH = +svg.getAttribute('height');
   if (!svgW || !svgH) return;
 
-  const sx = mw / svgW, sy = mh / svgH;
+  const sx = mw / svgW;
+  const sy = mh / svgH;
   ctx.clearRect(0, 0, mw, mh);
 
-  // Draw edges
-  ctx.strokeStyle = getComputedStyle(document.documentElement)
-    .getPropertyValue('--edge-color').trim() || '#ccc';
+  ctx.strokeStyle = cssVar('--edge-color') || '#ccc';
   ctx.lineWidth = 0.8;
   const mnw = NW(), mnh = NH();
   renderedNodes.forEach(node => {
@@ -1494,39 +1401,32 @@ function renderMinimap() {
     });
   });
 
-  // Draw nodes
   renderedNodes.forEach(node => {
     const info = layoutMap.get(node.id);
     if (!info) return;
     const isActive = isNodeOnActivePath(node);
-    const isUser   = node.role === 'user';
-    ctx.fillStyle = isActive
-      ? (isUser ? '#2383e2' : '#0f7b6c')
-      : node.kind === 'cluster' ? '#cbd5e1' : (isUser ? '#93c5fd' : '#6ee7b7');
+    const isUser = node.role === 'user';
+    ctx.fillStyle = isActive ? (isUser ? '#2383e2' : '#0f7b6c') : node.kind === 'cluster' ? '#cbd5e1' : (isUser ? '#93c5fd' : '#6ee7b7');
     ctx.globalAlpha = isActive ? 1 : 0.5;
     ctx.beginPath();
-    ctx.roundRect(
-      (info.x - mnw / 2) * sx, info.y * sy,
-      mnw * sx, mnh * sy, 2
-    );
+    ctx.roundRect((info.x - mnw / 2) * sx, info.y * sy, mnw * sx, mnh * sy, 2);
     ctx.fill();
   });
   ctx.globalAlpha = 1;
 
-  // Draw viewport rect
-  const tw = tree.clientWidth, th = tree.clientHeight;
+  const tw = tree.clientWidth;
+  const th = tree.clientHeight;
   const vx = (-cam.x / cam.scale) * sx;
   const vy = (-cam.y / cam.scale) * sy;
   const vw = (tw / cam.scale) * sx;
   const vh = (th / cam.scale) * sy;
   ctx.strokeStyle = '#2383e2';
-  ctx.lineWidth   = 1.5;
+  ctx.lineWidth = 1.5;
   ctx.globalAlpha = 0.8;
   ctx.strokeRect(vx, vy, vw, vh);
   ctx.globalAlpha = 1;
 }
 
-// ── Minimap click / drag → pan main view ─────────────────────────────────────
 function initMinimapClick() {
   const mini = document.getElementById('cbv-minimap');
   if (!mini) return;
@@ -1534,51 +1434,37 @@ function initMinimapClick() {
   let minimapDragging = false;
 
   function panFromMinimap(e) {
-    const svg  = document.querySelector('#cbv-canvas svg');
+    const svg = document.querySelector('#cbv-canvas svg');
     const tree = document.getElementById('cbv-tree');
     if (!svg || !tree) return;
-
-    const mr   = mini.getBoundingClientRect();
-    const mw   = mini.width,  mh  = mini.height;
+    const rect = mini.getBoundingClientRect();
     const svgW = +svg.getAttribute('width');
     const svgH = +svg.getAttribute('height');
     if (!svgW || !svgH) return;
 
-    // Fraction within minimap canvas
-    const fx = (e.clientX - mr.left)  / mr.width;
-    const fy = (e.clientY - mr.top)   / mr.height;
-
-    // Corresponding SVG-space coordinate
+    const fx = (e.clientX - rect.left) / rect.width;
+    const fy = (e.clientY - rect.top) / rect.height;
     const svgX = fx * svgW;
     const svgY = fy * svgH;
-
-    // Centre that SVG point in the viewport
-    const tw = tree.clientWidth, th = tree.clientHeight;
-    cam.x = tw / 2 - svgX * cam.scale;
-    cam.y = th / 2 - svgY * cam.scale;
-
+    cam.x = tree.clientWidth / 2 - svgX * cam.scale;
+    cam.y = tree.clientHeight / 2 - svgY * cam.scale;
     applyTransform();
     renderMinimap();
   }
 
   mini.style.cursor = 'crosshair';
-
   mini.addEventListener('mousedown', e => {
     minimapDragging = true;
     panFromMinimap(e);
     e.stopPropagation();
   });
-
   window.addEventListener('mousemove', e => {
     if (!minimapDragging) return;
     panFromMinimap(e);
   });
-
   window.addEventListener('mouseup', () => {
     minimapDragging = false;
   });
-
-  // Touch support for minimap
   mini.addEventListener('touchstart', e => {
     if (e.touches.length === 1) {
       minimapDragging = true;
@@ -1587,20 +1473,15 @@ function initMinimapClick() {
     e.stopPropagation();
     e.preventDefault();
   }, { passive: false });
-
   mini.addEventListener('touchmove', e => {
-    if (minimapDragging && e.touches.length === 1) {
-      panFromMinimap(e.touches[0]);
-    }
+    if (minimapDragging && e.touches.length === 1) panFromMinimap(e.touches[0]);
     e.preventDefault();
   }, { passive: false });
-
   mini.addEventListener('touchend', () => {
     minimapDragging = false;
   }, { passive: true });
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 function el(ns, tag, attrs = {}) {
   const e = document.createElementNS(ns, tag);
   for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
@@ -1609,8 +1490,9 @@ function el(ns, tag, attrs = {}) {
 
 function svgText(x, y, text, attrs = {}) {
   const NS = 'http://www.w3.org/2000/svg';
-  const t  = document.createElementNS(NS, 'text');
-  t.setAttribute('x', x); t.setAttribute('y', y);
+  const t = document.createElementNS(NS, 'text');
+  t.setAttribute('x', x);
+  t.setAttribute('y', y);
   for (const [k, v] of Object.entries(attrs)) t.setAttribute(k, v);
   t.textContent = text;
   return t;
@@ -1742,9 +1624,13 @@ function countLeaves() {
   return n;
 }
 
-// ── UI helpers ────────────────────────────────────────────────────────────────
+function setBuildBusy() {
+  document.getElementById('btn-build').hidden = true;
+  document.getElementById('btn-cancel').hidden = false;
+}
+
 function setBuildIdle() {
-  document.getElementById('btn-build').hidden  = false;
+  document.getElementById('btn-build').hidden = false;
   document.getElementById('btn-cancel').hidden = true;
 }
 
@@ -1754,41 +1640,52 @@ function setStatus(text, state = 'idle') {
   if (txt) txt.textContent = text;
   if (dot) {
     dot.className = 'cbv-status-dot';
-    if (state === 'ok')      dot.classList.add('ok');
+    if (state === 'ok') dot.classList.add('ok');
     if (state === 'working') dot.classList.add('working');
-    if (state === 'error')   dot.classList.add('error');
+    if (state === 'error') dot.classList.add('error');
   }
 }
 
 function setProgress(pct) {
   const bar = document.getElementById('cbv-progress-bar');
-  if (bar) bar.style.width = pct + '%';
+  if (bar) bar.style.width = `${pct}%`;
 }
+
 function showProgress() {
-  const w = document.getElementById('cbv-progress-wrap');
-  if (w) w.hidden = false;
+  const wrap = document.getElementById('cbv-progress-wrap');
+  if (wrap) wrap.hidden = false;
 }
+
 function hideProgress() {
-  const w = document.getElementById('cbv-progress-wrap');
-  if (w) w.hidden = true;
+  const wrap = document.getElementById('cbv-progress-wrap');
+  if (wrap) wrap.hidden = true;
 }
 
-// ── Storage restore ───────────────────────────────────────────────────────────
 async function restoreFromStorage() {
-  if (!currentTabId) return;
+  if (!currentPageUrl && currentTabId) {
+    try {
+      const tab = await chrome.tabs.get(currentTabId);
+      currentPageUrl = tab?.url || currentPageUrl;
+    } catch (_) {}
+  }
+  const key = storageKeyFromUrl(currentPageUrl);
+  if (!key) {
+    setStatus('Missing source chat URL', 'error');
+    return;
+  }
   try {
-    const tab = await chrome.tabs.get(currentTabId);
-    const key = storageKeyFromUrl(tab.url || '');
-    if (!key) return;
     const result = await chrome.storage.local.get(key);
-    const saved  = result[key];
-    if (!saved || !saved.nodes?.length) return;
-
-    // Only restore if saved within the last 24 hours
-    const AGE_LIMIT = 24 * 60 * 60 * 1000;
-    if (Date.now() - saved.savedAt > AGE_LIMIT) return;
-
-    treeNodes  = new Map(saved.nodes.map(n => [n.id, n]));
+    const saved = result[key];
+    if (!saved || !saved.nodes?.length) {
+      setStatus('No saved tree yet — build from the chat tab', 'idle');
+      return;
+    }
+    const ageLimit = 24 * 60 * 60 * 1000;
+    if (Date.now() - saved.savedAt > ageLimit) {
+      setStatus('Saved tree is older than 24h — rebuild recommended', 'error');
+      return;
+    }
+    treeNodes = new Map(saved.nodes.map(n => [n.id, n]));
     setTreeCompleteness('full');
     setActivePathState(saved.activePath || []);
     setVisiblePathState([]);
@@ -1796,22 +1693,24 @@ async function restoreFromStorage() {
     setStatus(`Restored ${treeNodes.size} nodes (saved ${timeAgo(saved.savedAt)})`, 'ok');
     collapseByDefault();
     requestAnimationFrame(fitView);
-  } catch (_) { /* storage unavailable — fine */ }
+  } catch (_) {
+    setStatus('Storage restore failed', 'error');
+  }
 }
 
 function storageKeyFromUrl(url) {
   try {
     const u = new URL(url);
-    if (!u.hostname.includes('chatgpt.com') &&
-        !u.hostname.includes('chat.openai.com') &&
-        !u.hostname.includes('claude.ai')) return null;
+    if (!u.hostname.includes('chatgpt.com') && !u.hostname.includes('chat.openai.com') && !u.hostname.includes('claude.ai')) return null;
     return 'cbv_tree_' + (u.pathname + u.hash).replace(/[^a-zA-Z0-9]/g, '_').slice(0, 120);
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 function timeAgo(ts) {
   const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60)   return `${s}s ago`;
+  if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   return `${Math.floor(s / 3600)}h ago`;
 }
