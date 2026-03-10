@@ -19,6 +19,8 @@ let treeLoadingShownAt = 0;
 let currentTabId = null;
 let currentPageUrl = '';
 let currentPlatform = 'unknown';
+let treeSource = 'live';
+let treeDataUrl = '';
 
 let cam = { x: 20, y: 20, scale: 1 };
 let isPanning = false;
@@ -117,6 +119,8 @@ function handleDirectResponse(msg) {
 }
 
 function onContentMessage(msg) {
+  if (isStaleMessage(msg)) return;
+  syncTreeDataContext(msg);
   switch (msg.type) {
     case 'PAGE_READY':
       if (msg.url && msg.url !== currentPageUrl) {
@@ -157,6 +161,7 @@ function onContentMessage(msg) {
       visiblePath.clear();
       visiblePathKeys.clear();
       expandedChainStarts.clear();
+      treeSource = 'live';
       setTreeCompleteness('building');
       setProgress(0);
       showProgress();
@@ -172,8 +177,9 @@ function onContentMessage(msg) {
     }
     case 'BUILD_DONE':
       treeNodes = new Map(msg.nodes.map(n => [n.id, n]));
+      treeSource = msg.partial ? 'live' : 'build';
       setTreeCompleteness(msg.partial ? 'partial' : 'full');
-      setActivePathState(msg.activePath);
+      setActivePathState(sanitizePathTurns(msg.activePath));
       setVisiblePathState([]);
       expandedChainStarts.clear();
       hideProgress();
@@ -206,13 +212,15 @@ function onContentMessage(msg) {
       break;
     case 'NAV_DONE':
     case 'ACTIVE_PATH':
+      msg.activePath = sanitizePathTurns(msg.activePath);
       setActivePathState(msg.activePath);
       hideTreeLoading(true);
+      setStatus(describeActivePathStatus(msg.activePath), 'ok');
       renderTree();
       requestAnimationFrame(panToActiveLeaf);
       break;
     case 'VISIBLE_RANGE':
-      setVisiblePathState(sanitizeTurns(msg.visiblePath));
+      setVisiblePathState(sanitizePathTurns(msg.visiblePath));
       renderTree();
       break;
 
@@ -225,7 +233,7 @@ function onContentMessage(msg) {
       const wasEmpty = treeNodes.size === 0;
       const wasPartial = treeCompleteness === 'partial';
       msg.turns = sanitizeTurns(msg.turns);
-      msg.activePath = sanitizeTurns(msg.activePath);
+      msg.activePath = sanitizePathTurns(msg.activePath);
       mergeTurnsIntoTree(msg.turns);
       if (treeCompleteness !== 'full') setTreeCompleteness('partial');
       setActivePathState(msg.activePath);
@@ -234,6 +242,27 @@ function onContentMessage(msg) {
       renderTree();
       break;
       }
+  }
+}
+
+function isStaleMessage(msg) {
+  if (!msg?.url || !currentPageUrl) return false;
+  return msg.type !== 'PAGE_READY' && msg.url !== currentPageUrl;
+}
+
+function syncTreeDataContext(msg) {
+  if (!msg?.url) return;
+  if (msg.type === 'PAGE_READY') {
+    treeDataUrl = msg.url;
+    return;
+  }
+  if (!treeDataUrl) {
+    treeDataUrl = msg.url;
+    return;
+  }
+  if (msg.url !== treeDataUrl) {
+    resetTreeState();
+    treeDataUrl = msg.url;
   }
 }
 
@@ -263,16 +292,41 @@ function nodeSig(node) {
   return `${node.turnIndex}:${node.branchIndex}:${node.role || ''}:${textSignature(node.text)}`;
 }
 
+function pathEntrySig(entry) {
+  return `${entry.turnIndex}:${entry.branchIndex}:${entry.role || ''}:${textSignature(entry.textSig || entry.text || '')}`;
+}
+
+function buildPathLineageSet(path) {
+  const set = new Set();
+  const parts = [];
+  for (const entry of path || []) {
+    parts.push(pathEntrySig(entry));
+    set.add(parts.join('>'));
+  }
+  return set;
+}
+
+function buildNodeLineageSig(node) {
+  const parts = [];
+  let cur = node;
+  while (cur) {
+    if (cur.kind === 'cluster') break;
+    parts.unshift(nodeSig(cur));
+    cur = cur.parentId ? treeNodes.get(cur.parentId) : null;
+  }
+  return parts.join('>');
+}
+
 function setActivePathState(path) {
   activePath = new Set((path || []).map(p => p.id));
   activePathKeys = new Set((path || []).map(p => pathKey(p.turnIndex, p.branchIndex)));
-  activePathSigs = new Set((path || []).map(p => `${p.turnIndex}:${p.branchIndex}:${p.role || ''}:${textSignature(p.textSig || p.text || '')}`));
+  activePathSigs = buildPathLineageSet(path || []);
 }
 
 function setVisiblePathState(path) {
   visiblePath = new Set((path || []).map(p => p.id));
   visiblePathKeys = new Set((path || []).map(p => pathKey(p.turnIndex, p.branchIndex)));
-  visiblePathSigs = new Set((path || []).map(p => `${p.turnIndex}:${p.branchIndex}:${p.role || ''}:${textSignature(p.textSig || p.text || '')}`));
+  visiblePathSigs = buildPathLineageSet(path || []);
 }
 
 function shouldRenderTurn(turn) {
@@ -284,6 +338,21 @@ function shouldRenderTurn(turn) {
 
 function sanitizeTurns(turns) {
   return (turns || []).filter(shouldRenderTurn);
+}
+
+function shouldKeepPathTurn(turn) {
+  if (!turn) return false;
+  return Boolean(turn.id || turn.role === 'user' || String(turn.text || '').trim());
+}
+
+function sanitizePathTurns(turns) {
+  return (turns || []).filter(shouldKeepPathTurn);
+}
+
+function describeActivePathStatus(path) {
+  const leaf = (path || []).at(-1);
+  if (!leaf) return 'Navigation complete';
+  return `Viewing turn ${leaf.turnIndex + 1}, branch ${leaf.branchIndex}`;
 }
 
 function mergeTurnsIntoTree(turns) {
@@ -335,7 +404,7 @@ function isNodeOnActivePath(node) {
       return original && isNodeOnActivePath(original);
     });
   }
-  return activePath.has(node.id) || activePathSigs.has(nodeSig(node));
+  return activePath.has(node.id) || activePathSigs.has(buildNodeLineageSig(node));
 }
 
 function isNodeVisible(node) {
@@ -346,7 +415,7 @@ function isNodeVisible(node) {
       return original && isNodeVisible(original);
     });
   }
-  return visiblePath.has(node.id) || visiblePathSigs.has(nodeSig(node));
+  return visiblePath.has(node.id) || visiblePathSigs.has(buildNodeLineageSig(node));
 }
 
 function hasExpandedChains() {
@@ -384,6 +453,7 @@ function updateTreeCompletenessBadge() {
     : 'cbv-tree-state-partial';
   el.className = `cbv-tree-state ${cls}`;
   el.textContent = treeCompleteness === 'full' ? 'Full' : treeCompleteness === 'building' ? 'Building...' : 'Partial';
+  el.toggleAttribute('data-snapshot', treeCompleteness === 'full' && treeSource === 'snapshot');
   updatePartialBanner();
 }
 
@@ -392,8 +462,10 @@ function updateBuildButtonLabel() {
   if (!btn) return;
   const label = btn.querySelector('span');
   if (label) label.textContent = treeCompleteness === 'full' ? 'Update Tree' : 'Build Full Tree';
-  btn.style.setProperty('--cbv-tool-expand-width', treeCompleteness === 'full' ? '108px' : '132px');
+  btn.style.setProperty('--cbv-tool-expand-width', treeCompleteness === 'full' ? '122px' : '142px');
+  btn.style.setProperty('--cbv-tool-label-max-width', treeCompleteness === 'full' ? '78px' : '96px');
   btn.classList.toggle('cbv-build-fab-attention', treeCompleteness === 'partial');
+  btn.classList.toggle('cbv-tool-fab-pinned', treeCompleteness === 'partial' || (treeCompleteness === 'full' && treeSource === 'snapshot'));
   btn.title = treeCompleteness === 'full'
     ? 'Update the full tree by traversing branches again'
     : 'Build full tree by traversing all branches';
@@ -454,6 +526,8 @@ function resetTreeState() {
   expandedChainStarts.clear();
   layoutMap.clear();
   treeCompleteness = 'partial';
+  treeSource = 'live';
+  treeDataUrl = currentPageUrl || '';
   document.getElementById('cbv-canvas')?.remove();
   const emptyEl = document.getElementById('cbv-empty');
   if (emptyEl) emptyEl.style.display = '';
@@ -1738,6 +1812,8 @@ async function restoreFromStorage() {
       return;
     }
     treeNodes = new Map(saved.nodes.map(n => [n.id, n]));
+    treeSource = 'snapshot';
+    treeDataUrl = currentPageUrl;
     setTreeCompleteness('full');
     setActivePathState(saved.activePath || []);
     setVisiblePathState([]);

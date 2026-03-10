@@ -56,7 +56,7 @@
       case 'CANCEL':
         return cmdCancel();
       case 'QUICK_SCAN':
-        return { type: 'SCAN_RESULT', turns: serializeTurns(readRawTurns()) };
+        return panelMessage({ type: 'SCAN_RESULT', turns: serializeTurns(readRawTurns()) });
       case 'NAVIGATE':
         return await cmdNavigate(msg.path);
       default:
@@ -66,7 +66,11 @@
 
   // ── Send to sidepanel (via background) ───────────────────────────────────────
   function sendToPanel(msg) {
-    chrome.runtime.sendMessage(msg).catch(() => {});
+    chrome.runtime.sendMessage(panelMessage(msg)).catch(() => {});
+  }
+
+  function panelMessage(msg) {
+    return { ...msg, url: msg.url || location.href };
   }
 
 function makePathEntry(turn) {
@@ -139,7 +143,7 @@ function makePathEntry(turn) {
     // Persist to storage
     saveToStorage(treeNodes, activePath);
 
-    return { ok: true };
+    return panelMessage({ ok: true });
   }
 
   // ── NAVIGATE command ─────────────────────────────────────────────────────────
@@ -166,7 +170,7 @@ function makePathEntry(turn) {
     const activePath = readCurrentPath();
     sendToPanel({ type: 'NAV_DONE', activePath });
     scheduleViewportSync();
-    return { ok: true, activePath };
+    return panelMessage({ ok: true, activePath });
   }
 
   // ── DFS tree builder ─────────────────────────────────────────────────────────
