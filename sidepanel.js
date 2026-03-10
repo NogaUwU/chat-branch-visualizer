@@ -533,9 +533,12 @@ function updateExpandToggleButton() {
   if (label) label.textContent = expanded ? 'Collapse All' : 'Expand All';
   btn.style.setProperty('--cbv-tool-expand-width', expanded ? '110px' : '102px');
   const icon = btn.querySelector('svg');
-  if (icon) icon.innerHTML = expanded
-    ? '<path d="M3 5H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 8H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 11H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.5 4.5L13 2L15.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.5 11.5L13 14L15.5 11.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
-    : '<path d="M3 5H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 8H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 11H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.5 3.5L13 6L15.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.5 12.5L13 10L15.5 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>';
+  if (icon) {
+    icon.setAttribute('viewBox', '0 -960 960 960');
+    icon.innerHTML = expanded
+      ? '<path fill="currentColor" d="M480-297 364-181q-9 9-21 8.5t-21-9.5q-9-9-9-21.5t9-21.5l137-137q5-5 10-7t11-2q6 0 11 2t10 7l138 138q9 9 9 21t-9 21q-9 9-21.5 9t-21.5-9L480-297Zm0-366 116-116q9-9 21-8.5t21 9.5q9 9 9 21.5t-9 21.5L501-598q-5 5-10 7t-11 2q-6 0-11-2t-10-7L321-736q-9-9-8.5-21.5T322-779q9-9 21.5-9t21.5 9l115 116Z"/>'
+      : '<path fill="currentColor" d="m480-208 114-114q9.13-9 22.07-9 12.93 0 21.93 9.1 9 9.11 9 22 0 12.9-9 21.9L501-141q-5 5-10.13 7-5.14 2-11 2-5.87 0-10.87-2-5-2-10-7L322-278q-9-9.13-9-22.07 0-12.93 9.1-21.93 9.11-9 22-9 12.9 0 21.9 9l114 114Zm0-540L366-634q-9.13 9-22.07 9-12.93 0-21.93-9.1-9-9.11-9-22 0-12.9 9-21.9l137-137q5-5 10.13-7 5.14-2 11-2 5.87 0 10.87 2 5 2 10 7l137 137q9 9.13 9 22.07 0 12.93-9.1 21.93-9.11 9-22 9-12.9 0-21.9-9L480-748Z"/>';
+  }
 }
 
 function setTreeCompleteness(mode) {
@@ -1912,6 +1915,9 @@ function detectCurrentPlatform() {
   return currentPlatform !== 'unknown' ? currentPlatform : cbvDetectPlatform(currentPageUrl);
 }
 
+// Unique ID counter for SVG clipPath elements
+let _badgeClipId = 0;
+
 function appendNodeBadge(parent, cx, cy, kind, active = false) {
   const NS = 'http://www.w3.org/2000/svg';
   const palette = {
@@ -1921,12 +1927,39 @@ function appendNodeBadge(parent, cx, cy, kind, active = false) {
     cluster: { bg: '#eef1f4', fg: '#6b7280' },
   }[kind] || { bg: '#eef1f4', fg: '#6b7280' };
 
+  // Background circle
   parent.appendChild(el(NS, 'circle', {
     cx, cy, r: '8',
     fill: palette.bg,
     stroke: active ? palette.fg : 'none',
     'stroke-width': active ? '1' : '0',
   }));
+
+  // Claude & ChatGPT: real logo images clipped to circle
+  if (kind === 'claude' || kind === 'chatgpt') {
+    const clipId = `cbv-bc-${++_badgeClipId}`;
+    const clipPath = document.createElementNS(NS, 'clipPath');
+    clipPath.setAttribute('id', clipId);
+    const clipCircle = document.createElementNS(NS, 'circle');
+    clipCircle.setAttribute('cx', cx);
+    clipCircle.setAttribute('cy', cy);
+    clipCircle.setAttribute('r', '7');
+    clipPath.appendChild(clipCircle);
+    parent.appendChild(clipPath);
+
+    const img = document.createElementNS(NS, 'image');
+    img.setAttribute('href', chrome.runtime.getURL(
+      kind === 'claude' ? 'img/badge-claude.png' : 'img/badge-chatgpt.png'
+    ));
+    img.setAttribute('x', cx - 7);
+    img.setAttribute('y', cy - 7);
+    img.setAttribute('width', '14');
+    img.setAttribute('height', '14');
+    img.setAttribute('clip-path', `url(#${clipId})`);
+    img.setAttribute('preserveAspectRatio', 'xMidYMid slice');
+    parent.appendChild(img);
+    return;
+  }
 
   if (kind === 'user') {
     parent.appendChild(el(NS, 'circle', { cx, cy: cy - 2.2, r: '2', fill: palette.fg }));
@@ -1943,21 +1976,6 @@ function appendNodeBadge(parent, cx, cy, kind, active = false) {
     });
     return;
   }
-
-  if (kind === 'claude') {
-    [[0,-3.5],[0,3.5],[-3.5,0],[3.5,0],[-2.5,-2.5],[2.5,-2.5],[-2.5,2.5],[2.5,2.5]].forEach(([dx,dy]) => {
-      parent.appendChild(el(NS, 'line', {
-        x1: cx, y1: cy, x2: cx + dx, y2: cy + dy,
-        stroke: palette.fg, 'stroke-width': '1.1', 'stroke-linecap': 'round',
-      }));
-    });
-    return;
-  }
-
-  [[0,-3.2],[2.8,-1.6],[2.8,1.6],[0,3.2],[-2.8,1.6],[-2.8,-1.6]].forEach(([dx,dy]) => {
-    parent.appendChild(el(NS, 'circle', { cx: cx + dx, cy: cy + dy, r: '1.35', fill: palette.fg }));
-  });
-  parent.appendChild(el(NS, 'circle', { cx, cy, r: '1.1', fill: palette.fg, opacity: '0.9' }));
 }
 
 function countLeaves() {
