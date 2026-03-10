@@ -181,12 +181,33 @@ html, body {
 .cbv-tree-state {
   display: inline-flex;
   align-items: center;
+  position: relative;
   height: 20px;
   padding: 0 8px;
   border-radius: 999px;
   font: 700 10px/1 var(--font-mono);
   letter-spacing: .04em;
   text-transform: uppercase;
+}
+
+.cbv-tree-state[data-snapshot] {
+  padding-right: 58px;
+}
+
+.cbv-tree-state[data-snapshot]::after {
+  content: 'SNAPSHOT';
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  transform: translateY(-50%);
+  padding: 2px 5px 1px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: currentColor;
+  opacity: .48;
+  font: 700 8px/1 var(--font-mono);
+  letter-spacing: .08em;
+  pointer-events: none;
 }
 
 .cbv-tree-state-partial {

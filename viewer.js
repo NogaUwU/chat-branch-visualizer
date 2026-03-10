@@ -105,7 +105,7 @@ let layoutMap = new Map();
 
   initInteraction();
   syncZoomSlider();
-  await restoreFromStorage();
+  await restoreFromStorage(currentPageUrl);
   sendToContent({ type: 'QUICK_SCAN' });
 })();
 
@@ -128,7 +128,7 @@ function onContentMessage(msg) {
         currentPlatform = msg.platform || detectCurrentPlatform();
         resetTreeState();
         showTreeLoading('Loading conversation…', 'Syncing tree with the newly opened chat', 'conversation');
-        restoreFromStorage();
+        restoreFromStorage(currentPageUrl);
       } else {
         currentPageUrl = msg.url || currentPageUrl;
         currentPlatform = msg.platform || detectCurrentPlatform();
@@ -140,17 +140,19 @@ function onContentMessage(msg) {
       const wasEmpty = treeNodes.size === 0;
       const wasPartial = treeCompleteness === 'partial';
       msg.turns = sanitizeTurns(msg.turns);
-      mergeTurnsIntoTree(msg.turns);
-      if (treeCompleteness !== 'full') setTreeCompleteness('partial');
-      setActivePathState(msg.turns.map(t => ({
+      if (treeCompleteness !== 'full') {
+        replaceTreeWithTurns(msg.turns);
+        setTreeCompleteness('partial');
+      }
+      setActivePathState(sanitizePathTurns(msg.turns.map(t => ({
         id: t.id || `t${t.turnIndex}_b${t.branchIndex}`,
         turnIndex: t.turnIndex,
         branchIndex: t.branchIndex,
         role: t.role,
         text: t.text,
-      })));
+      }))));
       setVisiblePathState([]);
-      if (wasEmpty || !wasPartial) setExpandedByDefaultForPartial();
+      if (treeCompleteness === 'partial' && (wasEmpty || !wasPartial)) setExpandedByDefaultForPartial();
       renderTree();
       break;
       }
@@ -234,11 +236,13 @@ function onContentMessage(msg) {
       const wasPartial = treeCompleteness === 'partial';
       msg.turns = sanitizeTurns(msg.turns);
       msg.activePath = sanitizePathTurns(msg.activePath);
-      mergeTurnsIntoTree(msg.turns);
-      if (treeCompleteness !== 'full') setTreeCompleteness('partial');
+      if (treeCompleteness !== 'full') {
+        replaceTreeWithTurns(msg.turns);
+        setTreeCompleteness('partial');
+      }
       setActivePathState(msg.activePath);
       if (msg.turns.length > 0 || msg.activePath.length > 0) hideTreeLoading(false);
-      if ((wasEmpty || !wasPartial) && treeCompleteness === 'partial') setExpandedByDefaultForPartial();
+      if (treeCompleteness === 'partial' && (wasEmpty || !wasPartial)) setExpandedByDefaultForPartial();
       renderTree();
       break;
       }
@@ -394,6 +398,33 @@ function mergeTurnsIntoTree(turns) {
     }
     parentId = id;
   }
+}
+
+function replaceTreeWithTurns(turns) {
+  const nextTree = new Map();
+  turns = sanitizeTurns(turns);
+  if (!turns?.length) {
+    treeNodes = nextTree;
+    return;
+  }
+  let parentId = null;
+  for (const turn of turns) {
+    const id = turn.id || `t${turn.turnIndex}_b${turn.branchIndex}`;
+    const node = {
+      id,
+      parentId,
+      turnIndex: turn.turnIndex,
+      branchIndex: turn.branchIndex,
+      branchTotal: turn.branchTotal || 1,
+      role: turn.role,
+      text: turn.text || '',
+      children: [],
+    };
+    nextTree.set(id, node);
+    if (parentId && nextTree.has(parentId)) nextTree.get(parentId).children.push(id);
+    parentId = id;
+  }
+  treeNodes = nextTree;
 }
 
 function isNodeOnActivePath(node) {
@@ -896,13 +927,16 @@ function renderTree() {
     const badgeKind = isCluster ? 'cluster' : isUser ? 'user' : assistantBrand();
     const nx = info.x - nw / 2;
     const ny = info.y;
-    const accentColor = isCluster ? C.nodeStroke : (isUser ? C.edgeActiveU : C.edgeActiveA);
+    const clusterActiveStroke = cssVar('--tx-badge');
+    const accentColor = isCluster
+      ? (isActive ? clusterActiveStroke : C.nodeStroke)
+      : (isUser ? C.edgeActiveU : C.edgeActiveA);
     const fill = isCluster
       ? cssVar('--bg-badge')
       : isActive ? (isUser ? C.nodeFillActiveU : C.nodeFillActiveA)
       : (isUser ? C.nodeFillU : C.nodeFillA);
     const stroke = isCluster
-      ? C.nodeStroke
+      ? (isActive ? clusterActiveStroke : C.nodeStroke)
       : isActive ? (isUser ? C.nodeStrokeActiveU : C.nodeStrokeActiveA)
       : C.nodeStroke;
 
@@ -1787,14 +1821,15 @@ function hideProgress() {
   if (wrap) wrap.hidden = true;
 }
 
-async function restoreFromStorage() {
+async function restoreFromStorage(expectedUrl = currentPageUrl) {
   if (!currentPageUrl && currentTabId) {
     try {
       const tab = await chrome.tabs.get(currentTabId);
       currentPageUrl = tab?.url || currentPageUrl;
     } catch (_) {}
   }
-  const key = storageKeyFromUrl(currentPageUrl);
+  if (!expectedUrl || currentPageUrl !== expectedUrl) return;
+  const key = storageKeyFromUrl(expectedUrl);
   if (!key) {
     setStatus('Missing source chat URL', 'error');
     return;
@@ -1811,9 +1846,10 @@ async function restoreFromStorage() {
       setStatus('Saved tree is older than 24h — rebuild recommended', 'error');
       return;
     }
+    if (currentPageUrl !== expectedUrl) return;
     treeNodes = new Map(saved.nodes.map(n => [n.id, n]));
     treeSource = 'snapshot';
-    treeDataUrl = currentPageUrl;
+    treeDataUrl = expectedUrl;
     setTreeCompleteness('full');
     setActivePathState(saved.activePath || []);
     setVisiblePathState([]);
