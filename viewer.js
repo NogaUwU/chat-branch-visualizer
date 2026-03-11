@@ -12,7 +12,7 @@ let renderedNodes = new Map();
 let renderedExpandedGroups = [];
 let expandedChainStarts = new Set();
 let forceCollapseAll = false;
-let treeCompleteness = 'empty';
+let treeCompleteness = 'loading';
 let treeLoadingMode = 'idle';
 let treeLoadingTimer = null;
 let treeLoadingShownAt = 0;
@@ -130,6 +130,7 @@ function onContentMessage(msg) {
         currentPageUrl = msg.url;
         currentPlatform = msg.platform || detectCurrentPlatform();
         resetTreeState();
+        setTreeCompleteness('loading');
         showTreeLoading('Loading conversation…', 'Syncing tree with the newly opened chat', 'conversation');
         restoreFromStorage(currentPageUrl);
       } else {
@@ -145,7 +146,7 @@ function onContentMessage(msg) {
       msg.turns = sanitizeTurns(msg.turns);
       if (treeCompleteness !== 'full') {
         replaceTreeWithTurns(msg.turns);
-        setTreeCompleteness(msg.turns.length ? 'partial' : 'empty');
+        setTreeCompleteness(msg.turns.length ? 'partial' : (treeLoadingMode === 'conversation' ? 'loading' : 'empty'));
       }
       setActivePathState(sanitizePathTurns(msg.turns.map(t => ({
         id: t.id || `t${t.turnIndex}_b${t.branchIndex}`,
@@ -230,6 +231,7 @@ function onContentMessage(msg) {
       break;
 
     case 'CONVERSATION_LOADING':
+      setTreeCompleteness('loading');
       showTreeLoading('Loading conversation…', `Waiting for ${assistantDisplayName()} to finish switching branches`, 'conversation');
       break;
 
@@ -241,7 +243,7 @@ function onContentMessage(msg) {
       msg.activePath = sanitizePathTurns(msg.activePath);
       if (treeCompleteness !== 'full') {
         replaceTreeWithTurns(msg.turns);
-        setTreeCompleteness(msg.turns.length ? 'partial' : 'empty');
+        setTreeCompleteness(msg.turns.length ? 'partial' : (treeLoadingMode === 'conversation' ? 'loading' : 'empty'));
       }
       setActivePathState(msg.activePath);
       if (msg.turns.length > 0 || msg.activePath.length > 0) hideTreeLoading(false);
@@ -484,6 +486,8 @@ function updateTreeCompletenessBadge() {
     ? 'cbv-tree-state-full'
     : treeCompleteness === 'building'
     ? 'cbv-tree-state-building'
+    : treeCompleteness === 'loading'
+    ? 'cbv-tree-state-loading'
     : treeCompleteness === 'empty'
     ? 'cbv-tree-state-empty'
     : 'cbv-tree-state-partial';
@@ -492,6 +496,8 @@ function updateTreeCompletenessBadge() {
     ? 'Full'
     : treeCompleteness === 'building'
     ? 'Building...'
+    : treeCompleteness === 'loading'
+    ? 'Loading...'
     : treeCompleteness === 'empty'
     ? 'Empty'
     : 'Partial';

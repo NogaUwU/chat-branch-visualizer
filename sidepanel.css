@@ -255,6 +255,11 @@ html, body {
   color: var(--tx-secondary);
 }
 
+.cbv-tree-state-loading {
+  background: color-mix(in srgb, var(--bg-btn-hover) 82%, transparent);
+  color: var(--tx-secondary);
+}
+
 .cbv-tree-state-full {
   background: var(--accent-bg);
   color: var(--accent);
