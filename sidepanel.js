@@ -2096,11 +2096,8 @@ function updateDiagnosticsActions() {
 }
 
 function syncDiagnosticsToggle(autoSend) {
-  const pill = document.getElementById('cbv-diagnostics-toggle-state');
-  const btn  = document.getElementById('btn-diagnostics-toggle');
-  if (!pill || !btn) return;
-  pill.textContent = autoSend ? 'On' : 'Off';
-  pill.dataset.on  = autoSend ? 'true' : 'false';
+  const btn = document.getElementById('btn-diagnostics-toggle');
+  if (!btn) return;
   btn.setAttribute('aria-pressed', autoSend ? 'true' : 'false');
 }
 

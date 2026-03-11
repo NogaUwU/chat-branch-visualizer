@@ -85,13 +85,12 @@
         <svg width="16" height="16" viewBox="0 -960 960 960" fill="none" aria-hidden="true"><path fill="currentColor" d="M480-120q-33 0-56.5-23.5T400-200q0-33 23.5-56.5T480-280q33 0 56.5 23.5T560-200q0 33-23.5 56.5T480-120Zm0-280q-33 0-56.5-23.5T400-480q0-33 23.5-56.5T480-560q33 0 56.5 23.5T560-480q0 33-23.5 56.5T480-400Zm0-280q-33 0-56.5-23.5T400-760q0-33 23.5-56.5T480-840q33 0 56.5 23.5T560-760q0 33-23.5 56.5T480-680Z"/></svg>
       </summary>
       <div class="cbv-menu-panel cbv-tool-menu-panel">
-        <button id="btn-diagnostics-toggle" class="cbv-btn cbv-menu-item cbv-menu-item-toggle" type="button">
+        <button id="btn-diagnostics-toggle" class="cbv-btn cbv-menu-item cbv-menu-item-toggle" type="button" aria-pressed="false">
           <span class="cbv-menu-item-label">Send diagnostics</span>
-          <span id="cbv-diagnostics-toggle-state" class="cbv-toggle-pill">Off</span>
+          <span class="cbv-switch" aria-hidden="true"><span class="cbv-switch-thumb"></span></span>
         </button>
-        <div class="cbv-menu-divider"></div>
-        <button id="btn-copy-diagnostics" class="cbv-btn cbv-menu-item" type="button">Copy Diagnostics</button>
-        <button id="btn-report-breakage" class="cbv-btn cbv-menu-item" type="button">Report Breakage</button>
+        <button id="btn-copy-diagnostics" class="cbv-btn cbv-menu-item" type="button" hidden>Copy Diagnostics</button>
+        <button id="btn-report-breakage" class="cbv-btn cbv-menu-item" type="button" hidden>Report Breakage</button>
       </div>
     </details>
     </div>

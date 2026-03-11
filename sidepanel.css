@@ -1062,36 +1062,70 @@ html, body {
   height: auto;
 }
 
+/* ── Menu panel entrance animation ────────────────────────────── */
+@keyframes cbv-menu-in {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+details[open] .cbv-tool-menu-panel {
+  animation: cbv-menu-in 160ms var(--ease-out) both;
+  transform-origin: bottom right;
+}
+
 /* ── Diagnostics toggle menu item ──────────────────────────────── */
 .cbv-menu-item-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
+  height: 36px;
   gap: 16px;
+  padding: 0 10px;
 }
 
 .cbv-menu-item-label {
   font-size: 13px;
+  color: var(--tx-primary);
 }
 
-.cbv-toggle-pill {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .04em;
-  padding: 2px 8px;
-  border-radius: 99px;
-  background: var(--bg-btn);
-  color: var(--tx-secondary);
-  transition: background 150ms, color 150ms;
+/* iOS-style switch */
+.cbv-switch {
+  position: relative;
   flex-shrink: 0;
+  width: 34px;
+  height: 20px;
+  border-radius: 99px;
+  background: var(--bd-strong);
+  transition: background 220ms var(--ease-out);
 }
 
-.cbv-toggle-pill[data-on="true"] {
-  background: var(--accent-bg);
-  color: var(--accent);
+.cbv-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  transition: transform 220ms var(--ease-out), box-shadow 220ms var(--ease-out);
 }
 
+[aria-pressed="true"] .cbv-switch {
+  background: var(--accent);
+}
+
+[aria-pressed="true"] .cbv-switch-thumb {
+  transform: translateX(14px);
+  box-shadow: 0 1px 4px rgba(0,0,0,.18);
+}
+
+.cbv-menu-item-toggle:hover .cbv-switch {
+  filter: brightness(1.08);
+}
+
+/* ── Menu divider (kept for potential future use) ──────────────── */
 .cbv-menu-divider {
   height: 1px;
   background: var(--bd);
