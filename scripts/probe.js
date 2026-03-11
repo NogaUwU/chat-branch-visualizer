@@ -113,15 +113,15 @@ async function probeTarget(context, target) {
 async function main() {
   if (!TARGETS.length) {
     const result = {
-      ok: false,
-      reason: 'missing_probe_targets',
-      message: 'Set TEST_CHATGPT_URL and/or TEST_CLAUDE_URL before running probe.',
+      ok: true,
+      reason: 'skipped',
+      message: 'No probe targets configured. Set TEST_CHATGPT_URL and/or TEST_CLAUDE_URL to enable.',
       selectorsVersion: selectors.version,
       results: [],
     };
     fs.writeFileSync(OUTFILE, JSON.stringify(result, null, 2));
-    console.error(result.message);
-    process.exit(1);
+    console.log(result.message);
+    process.exit(0);
   }
 
   const userDataDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cbv-probe-'));
