@@ -109,6 +109,7 @@ let layoutMap = new Map();   // nodeId → { x, y, w }
   document.getElementById('cbv-zoom-slider').addEventListener('input', onZoomSliderInput);
   document.getElementById('btn-copy-diagnostics').addEventListener('click', copyDiagnostics);
   document.getElementById('btn-report-breakage').addEventListener('click', reportBreakage);
+  document.getElementById('btn-diagnostics-toggle').addEventListener('click', toggleDiagnosticsConsent);
   document.getElementById('btn-consent-allow').addEventListener('click', () => saveConsent(true));
   document.getElementById('btn-consent-deny').addEventListener('click',  () => saveConsent(false));
   updateExpandToggleButton();
@@ -136,6 +137,7 @@ async function initConsentBanner() {
     if (!consent?.decided) {
       document.getElementById('cbv-consent-banner').hidden = false;
     }
+    syncDiagnosticsToggle(consent?.autoSend === true);
   } catch (_) {}
 }
 
@@ -143,6 +145,16 @@ async function saveConsent(allow) {
   document.getElementById('cbv-consent-banner').hidden = true;
   try {
     await chrome.storage.local.set({ [CBV_CONSENT_KEY]: { decided: true, autoSend: allow } });
+    syncDiagnosticsToggle(allow);
+  } catch (_) {}
+}
+
+async function toggleDiagnosticsConsent() {
+  closeMoreMenu();
+  try {
+    const result = await chrome.storage.local.get(CBV_CONSENT_KEY);
+    const current = result[CBV_CONSENT_KEY]?.autoSend === true;
+    await saveConsent(!current);
   } catch (_) {}
 }
 
@@ -2075,16 +2087,21 @@ function detectCurrentPlatform() {
 
 function updateDiagnosticsActions() {
   const hasDiagnostics = Boolean(lastDiagnostics);
-  const reporting = typeof cbvGetReportingConfig === 'function' ? cbvGetReportingConfig() : { manualReports: false };
   const menu = document.getElementById('cbv-more-menu');
   const copyBtn = document.getElementById('btn-copy-diagnostics');
   const reportBtn = document.getElementById('btn-report-breakage');
-  if (menu) {
-    menu.hidden = !(reporting.manualReports && hasDiagnostics);
-    if (menu.hidden) menu.open = false;
-  }
+  if (menu) menu.hidden = false;
   if (copyBtn) copyBtn.dataset.ready = hasDiagnostics ? 'true' : 'false';
   if (reportBtn) reportBtn.dataset.ready = hasDiagnostics ? 'true' : 'false';
+}
+
+function syncDiagnosticsToggle(autoSend) {
+  const pill = document.getElementById('cbv-diagnostics-toggle-state');
+  const btn  = document.getElementById('btn-diagnostics-toggle');
+  if (!pill || !btn) return;
+  pill.textContent = autoSend ? 'On' : 'Off';
+  pill.dataset.on  = autoSend ? 'true' : 'false';
+  btn.setAttribute('aria-pressed', autoSend ? 'true' : 'false');
 }
 
 async function copyDiagnostics() {

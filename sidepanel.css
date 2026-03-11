@@ -1061,3 +1061,39 @@ html, body {
   padding: 5px 14px;
   height: auto;
 }
+
+/* ── Diagnostics toggle menu item ──────────────────────────────── */
+.cbv-menu-item-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 16px;
+}
+
+.cbv-menu-item-label {
+  font-size: 13px;
+}
+
+.cbv-toggle-pill {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: var(--bg-btn);
+  color: var(--tx-secondary);
+  transition: background 150ms, color 150ms;
+  flex-shrink: 0;
+}
+
+.cbv-toggle-pill[data-on="true"] {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.cbv-menu-divider {
+  height: 1px;
+  background: var(--bd);
+  margin: 4px 0;
+}
