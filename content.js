@@ -306,8 +306,10 @@ function makePathEntry(turn) {
       await dfsCollect(null, 0, treeNodes, buildDeadline);
     } catch (e) {
       const reason = cancelled ? 'cancelled' : e.message;
-      building   = false;
-      cancelled  = false;
+      building       = false;
+      cancelled      = false;
+      lastStateSig   = '';
+      lastVisibleSig = '';
       startObserver();
       if (reason === 'build_timeout') {
         const activePath = readCurrentPath();
@@ -336,6 +338,8 @@ function makePathEntry(turn) {
 
     building  = false;
     cancelled = false;
+    lastStateSig   = '';
+    lastVisibleSig = '';
     startObserver();
 
     const activePath = readCurrentPath();
