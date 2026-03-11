@@ -124,6 +124,8 @@ function sanitizeDiagnostics(diagnostics) {
 function shouldAutoSendDiagnostics(diagnostics) {
   const config = getReportingConfig();
   if (!config.enabled || !config.autoSend || !config.endpoint) return false;
+  const platform = diagnostics?.platform || diagnostics?.probe?.platform;
+  if (platform !== 'chatgpt' && platform !== 'claude') return false;
   const reason = diagnostics?.reason || '';
   const broken = diagnostics?.probe?.broken || [];
   return broken.length > 0 || reason === 'build_error' || reason === 'no_turns_detected' || reason === 'branch_navigation_warning';

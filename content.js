@@ -68,6 +68,7 @@
   let selectorConfig = DEFAULT_SELECTORS;
   let lastDiagnostics = null;
   let lastDiagnosticSig = '';
+  let pageLoadStartedAt = Date.now();
 
   // ── Platform ────────────────────────────────────────────────────────────────
   function detectPlatform() {
@@ -78,6 +79,10 @@
   init();
 
   function init() {
+    if (PLATFORM === 'unknown') {
+      sendToPanel({ type: 'PAGE_READY', platform: PLATFORM, url: location.href, supported: false });
+      return;
+    }
     injectHighlightStyle();
     loadSelectorConfig().catch(() => {});
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -973,9 +978,38 @@ function makePathEntry(turn) {
     }, VIEWPORT_SYNC_MS);
   }
 
+  function resetLoadingWindow() {
+    pageLoadStartedAt = Date.now();
+  }
+
+  function pageSeemsLoading() {
+    if (Date.now() - pageLoadStartedAt < 7000) return true;
+
+    const loadingSelectors = [
+      "[aria-busy='true']",
+      "[role='progressbar']",
+      "[data-testid*='loading']",
+      "[class*='loading']",
+      "[class*='spinner']",
+      "[class*='skeleton']",
+    ];
+
+    for (const selector of loadingSelectors) {
+      try {
+        if (document.querySelector(selector)) return true;
+      } catch (_) {}
+    }
+
+    return false;
+  }
+
   function syncStateToPanel(force = false) {
     const turns = serializeTurns(readRawTurns());
     if (!turns.length) {
+      if (pageSeemsLoading()) {
+        sendToPanel({ type: 'CONVERSATION_LOADING' });
+        return;
+      }
       maybeReportBreakage('no_turns_detected', {
         phase: 'sync',
         force,
@@ -1000,6 +1034,7 @@ function makePathEntry(turn) {
         lastVisibleSig = '';
         lastDiagnostics = null;
         lastDiagnosticSig = '';
+        resetLoadingWindow();
         sendToPanel({ type: 'PAGE_READY', platform: PLATFORM, url: location.href });
         syncStateToPanel(true);
       }

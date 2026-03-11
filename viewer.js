@@ -12,7 +12,7 @@ let renderedNodes = new Map();
 let renderedExpandedGroups = [];
 let expandedChainStarts = new Set();
 let forceCollapseAll = false;
-let treeCompleteness = 'partial';
+let treeCompleteness = 'empty';
 let treeLoadingMode = 'idle';
 let treeLoadingTimer = null;
 let treeLoadingShownAt = 0;
@@ -21,6 +21,7 @@ let currentPageUrl = '';
 let currentPlatform = 'unknown';
 let treeSource = 'live';
 let treeDataUrl = '';
+let toolFabMeasureCanvas = null;
 
 let cam = { x: 20, y: 20, scale: 1 };
 let isPanning = false;
@@ -103,6 +104,7 @@ let layoutMap = new Map();
   document.getElementById('cbv-zoom-slider').addEventListener('input', onZoomSliderInput);
   updateExpandToggleButton();
   updateTreeCompletenessBadge();
+  syncAllToolFabWidths();
 
   initInteraction();
   syncZoomSlider();
@@ -143,7 +145,7 @@ function onContentMessage(msg) {
       msg.turns = sanitizeTurns(msg.turns);
       if (treeCompleteness !== 'full') {
         replaceTreeWithTurns(msg.turns);
-        setTreeCompleteness('partial');
+        setTreeCompleteness(msg.turns.length ? 'partial' : 'empty');
       }
       setActivePathState(sanitizePathTurns(msg.turns.map(t => ({
         id: t.id || `t${t.turnIndex}_b${t.branchIndex}`,
@@ -239,7 +241,7 @@ function onContentMessage(msg) {
       msg.activePath = sanitizePathTurns(msg.activePath);
       if (treeCompleteness !== 'full') {
         replaceTreeWithTurns(msg.turns);
-        setTreeCompleteness('partial');
+        setTreeCompleteness(msg.turns.length ? 'partial' : 'empty');
       }
       setActivePathState(msg.activePath);
       if (msg.turns.length > 0 || msg.activePath.length > 0) hideTreeLoading(false);
@@ -462,11 +464,11 @@ function updateExpandToggleButton() {
   btn.classList.toggle('cbv-tool-fab-active', expanded);
   const label = btn.querySelector('span');
   if (label) label.textContent = expanded ? 'Collapse All' : 'Expand All';
-  btn.style.setProperty('--cbv-tool-expand-width', expanded ? '110px' : '102px');
   const icon = btn.querySelector('svg');
   if (icon) icon.innerHTML = expanded
     ? '<path d="M3 5H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 8H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 11H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.5 4.5L13 2L15.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.5 11.5L13 14L15.5 11.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
     : '<path d="M3 5H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 8H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3 11H10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.5 3.5L13 6L15.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.5 12.5L13 10L15.5 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>';
+  syncToolFabWidth(btn);
 }
 
 function setTreeCompleteness(mode) {
@@ -482,9 +484,17 @@ function updateTreeCompletenessBadge() {
     ? 'cbv-tree-state-full'
     : treeCompleteness === 'building'
     ? 'cbv-tree-state-building'
+    : treeCompleteness === 'empty'
+    ? 'cbv-tree-state-empty'
     : 'cbv-tree-state-partial';
   el.className = `cbv-tree-state ${cls}`;
-  el.textContent = treeCompleteness === 'full' ? 'Full' : treeCompleteness === 'building' ? 'Building...' : 'Partial';
+  el.textContent = treeCompleteness === 'full'
+    ? 'Full'
+    : treeCompleteness === 'building'
+    ? 'Building...'
+    : treeCompleteness === 'empty'
+    ? 'Empty'
+    : 'Partial';
   el.toggleAttribute('data-snapshot', treeCompleteness === 'full' && treeSource === 'snapshot');
   updatePartialBanner();
 }
@@ -494,13 +504,47 @@ function updateBuildButtonLabel() {
   if (!btn) return;
   const label = btn.querySelector('span');
   if (label) label.textContent = treeCompleteness === 'full' ? 'Update Tree' : 'Build Full Tree';
-  btn.style.setProperty('--cbv-tool-expand-width', treeCompleteness === 'full' ? '122px' : '142px');
-  btn.style.setProperty('--cbv-tool-label-max-width', treeCompleteness === 'full' ? '78px' : '96px');
   btn.classList.toggle('cbv-build-fab-attention', treeCompleteness === 'partial');
-  btn.classList.toggle('cbv-tool-fab-pinned', treeCompleteness === 'partial' || (treeCompleteness === 'full' && treeSource === 'snapshot'));
+  btn.classList.toggle('cbv-tool-fab-pinned', treeCompleteness === 'empty' || treeCompleteness === 'partial' || (treeCompleteness === 'full' && treeSource === 'snapshot'));
   btn.title = treeCompleteness === 'full'
     ? 'Update the full tree by traversing branches again'
     : 'Build full tree by traversing all branches';
+  syncToolFabWidth(btn);
+}
+
+function getToolFabMeasureCanvas() {
+  if (!toolFabMeasureCanvas) toolFabMeasureCanvas = document.createElement('canvas');
+  return toolFabMeasureCanvas;
+}
+
+function measureToolFabLabelWidth(button) {
+  const label = button?.querySelector('span');
+  if (!label) return 0;
+  const text = (label.textContent || '').trim();
+  if (!text) return 0;
+
+  const ctx = getToolFabMeasureCanvas().getContext('2d');
+  if (!ctx) return Math.ceil(label.scrollWidth || 0);
+
+  const style = window.getComputedStyle(button);
+  ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  return Math.ceil(ctx.measureText(text).width);
+}
+
+function syncToolFabWidth(button) {
+  if (!button || button.classList.contains('cbv-menu-trigger')) return;
+  const labelWidth = measureToolFabLabelWidth(button);
+  const collapsedWidth = 34;
+  const horizontalPadding = labelWidth > 0 ? 12 : 0;
+  const gap = labelWidth > 0 ? 5 : 0;
+  const extraBuffer = 1;
+  const expandedWidth = Math.max(collapsedWidth, collapsedWidth + labelWidth + gap + horizontalPadding + extraBuffer);
+  button.style.setProperty('--cbv-tool-label-max-width', `${labelWidth}px`);
+  button.style.setProperty('--cbv-tool-expand-width', `${expandedWidth}px`);
+}
+
+function syncAllToolFabWidths() {
+  document.querySelectorAll('.cbv-tool-fab').forEach(syncToolFabWidth);
 }
 
 function updatePartialBanner() {
@@ -557,7 +601,7 @@ function resetTreeState() {
   renderedExpandedGroups = [];
   expandedChainStarts.clear();
   layoutMap.clear();
-  treeCompleteness = 'partial';
+  treeCompleteness = 'empty';
   treeSource = 'live';
   treeDataUrl = currentPageUrl || '';
   document.getElementById('cbv-canvas')?.remove();

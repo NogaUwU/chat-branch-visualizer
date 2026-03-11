@@ -156,18 +156,32 @@ html, body {
   gap: 8px;
 }
 
+.cbv-tree-summary {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--tx-secondary);
+  font: 600 11px/1.2 var(--font-ui);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .cbv-logo {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 0 auto;
   text-decoration: none;
   color: inherit;
 }
 
 .cbv-logo-icon {
-  width: 20px; height: 20px;
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+  display: block;
   flex-shrink: 0;
-  opacity: .85;
 }
 
 .cbv-title {
@@ -181,6 +195,7 @@ html, body {
 .cbv-tree-state {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   position: relative;
   height: 20px;
   padding: 0 8px;
@@ -188,6 +203,26 @@ html, body {
   font: 700 10px/1 var(--font-mono);
   letter-spacing: .04em;
   text-transform: uppercase;
+}
+
+.cbv-tree-state::before {
+  font: 700 10px/1 var(--font-ui);
+}
+
+.cbv-tree-state-full::before {
+  content: '✓';
+}
+
+.cbv-tree-state-full[data-snapshot]::before {
+  content: '?';
+}
+
+.cbv-tree-state-building::before {
+  content: '…';
+}
+
+.cbv-tree-state-empty::before {
+  content: '+';
 }
 
 .cbv-tree-state[data-snapshot] {
@@ -215,9 +250,19 @@ html, body {
   color: var(--tx-badge);
 }
 
+.cbv-tree-state-empty {
+  background: color-mix(in srgb, var(--bg-btn) 84%, transparent);
+  color: var(--tx-secondary);
+}
+
 .cbv-tree-state-full {
   background: var(--accent-bg);
   color: var(--accent);
+}
+
+.cbv-tree-state-full[data-snapshot] {
+  background: color-mix(in srgb, #dbe7f7 84%, white);
+  color: #5f7697;
 }
 
 .cbv-tree-state-building {
@@ -404,7 +449,6 @@ html, body {
   height: 28px;
   font-size: 11px;
   color: var(--tx-muted);
-  border-bottom: 1px solid var(--bd);
   flex-shrink: 0;
   white-space: nowrap;
   overflow: hidden;
@@ -463,7 +507,6 @@ html, body {
 
   #cbv-status {
     background: color-mix(in srgb, var(--bg-header) 74%, transparent);
-    border-bottom-color: color-mix(in srgb, var(--bd) 82%, transparent);
   }
 
   #cbv-tree {
@@ -506,6 +549,13 @@ html, body {
     background:
       linear-gradient(180deg, rgba(99,179,255,0.14), rgba(99,179,255,0.03)),
       var(--accent-bg);
+  }
+
+  .cbv-tree-state-full[data-snapshot] {
+    background:
+      linear-gradient(180deg, rgba(154, 176, 208, 0.18), rgba(154, 176, 208, 0.04)),
+      color-mix(in srgb, #27384d 74%, var(--bg-app));
+    color: #a8bddb;
   }
 
   .cbv-tree-state-partial,
@@ -579,57 +629,61 @@ html, body {
 .cbv-tool-fab {
   position: absolute;
   position: relative;
-  width: 38px;
-  min-width: 38px;
+  width: 34px;
+  min-width: 34px;
   --cbv-tool-expand-width: 112px;
   --cbv-tool-label-max-width: 72px;
   height: 34px;
-  padding: 0 11px;
+  padding: 0;
   border: 1px solid var(--bd-strong);
   border-radius: 999px;
   background: color-mix(in srgb, var(--bg-app) 92%, transparent);
   color: var(--tx-secondary);
   display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
+  justify-content: center;
+  gap: 0;
   overflow: hidden;
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,.10);
-  transition: width .42s cubic-bezier(0.2, 0.9, 0.2, 1.12), background .18s var(--ease-out), color .18s var(--ease-out), transform .14s var(--ease-out), box-shadow .18s var(--ease-out);
+  transition: width .42s cubic-bezier(0.2, 0.9, 0.2, 1.12), padding .42s cubic-bezier(0.2, 0.9, 0.2, 1.12), gap .42s cubic-bezier(0.2, 0.9, 0.2, 1.12), background .18s var(--ease-out), color .18s var(--ease-out), transform .14s var(--ease-out), box-shadow .18s var(--ease-out);
   font: 600 11px/1 var(--font-sans);
 }
 
 .cbv-tool-fab:hover,
 .cbv-tool-fab:focus-visible {
   width: var(--cbv-tool-expand-width);
-  justify-content: flex-start;
+  padding-inline: 6px;
+  gap: 4px;
+  justify-content: center;
 }
 
 .cbv-tool-fab.cbv-tool-fab-pinned {
   width: var(--cbv-tool-expand-width);
-  justify-content: flex-start;
+  padding-inline: 6px;
+  gap: 4px;
+  justify-content: center;
 }
 
 .cbv-tool-fab svg {
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
-  transform: translateX(0);
-  transition: transform .42s cubic-bezier(0.2, 0.9, 0.2, 1.12);
+  transform: none;
+  transition: opacity .18s ease;
 }
 
 .cbv-tool-fab span {
   white-space: nowrap;
   opacity: 0;
   max-width: 0;
-  transform: translateX(8px);
+  transform: translateX(6px);
   transition: opacity .18s ease, max-width .42s cubic-bezier(0.2, 0.9, 0.2, 1.12), transform .42s cubic-bezier(0.2, 0.9, 0.2, 1.12);
 }
 
 .cbv-tool-fab:hover svg,
 .cbv-tool-fab:focus-visible svg {
-  transform: translateX(-1px);
+  transform: none;
 }
 
 .cbv-tool-fab:hover span,

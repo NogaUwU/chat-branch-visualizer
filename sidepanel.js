@@ -13,7 +13,7 @@ let renderedNodes = new Map();
 let renderedExpandedGroups = [];
 let expandedChainStarts = new Set();
 let forceCollapseAll = false;
-let treeCompleteness = 'partial';
+let treeCompleteness = 'empty';
 let treeLoadingMode = 'idle';
 let treeLoadingTimer = null;
 let treeLoadingShownAt = 0;
@@ -24,6 +24,7 @@ let panelPort = null;
 let treeSource = 'live';
 let treeDataUrl = '';
 let lastDiagnostics = null;
+let toolFabMeasureCanvas = null;
 
 // ── Camera ────────────────────────────────────────────────────────────────────
 let cam = { x: 20, y: 20, scale: 1 };
@@ -112,6 +113,7 @@ let layoutMap = new Map();   // nodeId → { x, y, w }
   updateTreeCompletenessBadge();
   updateDiagnosticsActions();
   initMoreMenu();
+  syncAllToolFabWidths();
 
   initInteraction();
   syncZoomSlider();
@@ -148,6 +150,24 @@ async function bindToActiveTab({ reset = true, restore = false } = {}) {
   currentPlatform = nextPlatform;
 
   panelPort?.postMessage({ type: 'REGISTER', tabId: currentTabId });
+
+  if (!nextTabId) {
+    resetTreeState();
+    hideTreeLoading(true);
+    setSupportedPageEmptyState('empty');
+    setStatus('Waiting for page…', 'idle');
+    return;
+  }
+
+  if (!isSupportedPlatform(nextPlatform)) {
+    resetTreeState();
+    hideTreeLoading(true);
+    setSupportedPageEmptyState('unsupported');
+    setStatus('Open a ChatGPT or Claude conversation', 'idle');
+    return;
+  }
+
+  setSupportedPageEmptyState('supported');
 
   if (reset && changed) {
     resetTreeState();
@@ -188,6 +208,15 @@ function onContentMessage(msg) {
   syncTreeDataContext(msg);
   switch (msg.type) {
     case 'PAGE_READY':
+      if (msg.supported === false || !isSupportedPlatform(msg.platform)) {
+        currentPageUrl = msg.url || currentPageUrl;
+        currentPlatform = 'unknown';
+        resetTreeState();
+        hideTreeLoading(true);
+        setSupportedPageEmptyState('unsupported');
+        setStatus('Open a ChatGPT or Claude conversation', 'idle');
+        break;
+      }
       if (msg.url && msg.url !== currentPageUrl) {
         currentPageUrl = msg.url;
         currentPlatform = msg.platform || detectCurrentPlatform();
@@ -208,7 +237,7 @@ function onContentMessage(msg) {
       msg.turns = sanitizeTurns(msg.turns);
       if (treeCompleteness !== 'full') {
         replaceTreeWithTurns(msg.turns);
-        setTreeCompleteness('partial');
+        setTreeCompleteness(msg.turns.length ? 'partial' : 'empty');
       }
       setActivePathState(sanitizePathTurns(msg.turns.map(t => ({
         id: t.id || `t${t.turnIndex}_b${t.branchIndex}`,
@@ -252,8 +281,8 @@ function onContentMessage(msg) {
       hideTreeLoading(true);
       setStatus(
         msg.partial
-          ? `${treeNodes.size} nodes · partial tree (${msg.reason || 'incomplete'})`
-          : `${treeNodes.size} nodes · ${countLeaves()} branches`,
+          ? `Partial tree ready${msg.reason ? ` · ${msg.reason}` : ''}`
+          : 'Full tree ready',
         msg.partial ? 'idle' : 'ok'
       );
       if (msg.partial) setExpandedByDefaultForPartial();
@@ -284,7 +313,9 @@ function onContentMessage(msg) {
       lastDiagnostics = msg.diagnostics || null;
       updateDiagnosticsActions();
       if (lastDiagnostics?.probe?.broken?.length) {
-        setStatus(`Selector mismatch detected · ${lastDiagnostics.probe.broken.join(', ')}`, 'error');
+        if (!(treeCompleteness === 'full' && treeSource === 'snapshot' && treeNodes.size > 0)) {
+          setStatus(`Selector mismatch detected · ${lastDiagnostics.probe.broken.join(', ')}`, 'error');
+        }
       }
       break;
 
@@ -316,7 +347,7 @@ function onContentMessage(msg) {
       msg.activePath = sanitizePathTurns(msg.activePath);
       if (treeCompleteness !== 'full') {
         replaceTreeWithTurns(msg.turns);
-        setTreeCompleteness('partial');
+        setTreeCompleteness(msg.turns.length ? 'partial' : 'empty');
       }
       setActivePathState(msg.activePath);
       if (msg.turns.length > 0 || msg.activePath.length > 0) hideTreeLoading(false);
@@ -488,6 +519,7 @@ function replaceTreeWithTurns(turns) {
   turns = sanitizeTurns(turns);
   if (!turns?.length) {
     treeNodes = nextTree;
+    updateTreeSummary();
     return;
   }
   let parentId = null;
@@ -508,6 +540,7 @@ function replaceTreeWithTurns(turns) {
     parentId = id;
   }
   treeNodes = nextTree;
+  updateTreeSummary();
 }
 
 function isNodeOnActivePath(node) {
@@ -544,7 +577,6 @@ function updateExpandToggleButton() {
   btn.classList.toggle('cbv-tool-fab-active', expanded);
   const label = btn.querySelector('span');
   if (label) label.textContent = expanded ? 'Collapse All' : 'Expand All';
-  btn.style.setProperty('--cbv-tool-expand-width', expanded ? '110px' : '102px');
   const icon = btn.querySelector('svg');
   if (icon) {
     icon.setAttribute('viewBox', '0 -960 960 960');
@@ -552,12 +584,14 @@ function updateExpandToggleButton() {
       ? '<path fill="currentColor" d="M480-297 364-181q-9 9-21 8.5t-21-9.5q-9-9-9-21.5t9-21.5l137-137q5-5 10-7t11-2q6 0 11 2t10 7l138 138q9 9 9 21t-9 21q-9 9-21.5 9t-21.5-9L480-297Zm0-366 116-116q9-9 21-8.5t21 9.5q9 9 9 21.5t-9 21.5L501-598q-5 5-10 7t-11 2q-6 0-11-2t-10-7L321-736q-9-9-8.5-21.5T322-779q9-9 21.5-9t21.5 9l115 116Z"/>'
       : '<path fill="currentColor" d="m480-208 114-114q9.13-9 22.07-9 12.93 0 21.93 9.1 9 9.11 9 22 0 12.9-9 21.9L501-141q-5 5-10.13 7-5.14 2-11 2-5.87 0-10.87-2-5-2-10-7L322-278q-9-9.13-9-22.07 0-12.93 9.1-21.93 9.11-9 22-9 12.9 0 21.9 9l114 114Zm0-540L366-634q-9.13 9-22.07 9-12.93 0-21.93-9.1-9-9.11-9-22 0-12.9 9-21.9l137-137q5-5 10.13-7 5.14-2 11-2 5.87 0 10.87 2 5 2 10 7l137 137q9 9.13 9 22.07 0 12.93-9.1 21.93-9.11 9-22 9-12.9 0-21.9-9L480-748Z"/>';
   }
+  syncToolFabWidth(btn);
 }
 
 function setTreeCompleteness(mode) {
   treeCompleteness = mode;
   updateTreeCompletenessBadge();
   updateBuildButtonLabel();
+  updateTreeSummary();
 }
 
 function updateTreeCompletenessBadge() {
@@ -567,11 +601,32 @@ function updateTreeCompletenessBadge() {
     ? 'cbv-tree-state-full'
     : treeCompleteness === 'building'
     ? 'cbv-tree-state-building'
+    : treeCompleteness === 'empty'
+    ? 'cbv-tree-state-empty'
     : 'cbv-tree-state-partial';
   el.className = `cbv-tree-state ${cls}`;
-  el.textContent = treeCompleteness === 'full' ? 'Full' : treeCompleteness === 'building' ? 'Building...' : 'Partial';
+  el.textContent = treeCompleteness === 'full'
+    ? 'Full'
+    : treeCompleteness === 'building'
+    ? 'Building...'
+    : treeCompleteness === 'empty'
+    ? 'Empty'
+    : 'Partial';
   el.toggleAttribute('data-snapshot', treeCompleteness === 'full' && treeSource === 'snapshot');
   updatePartialBanner();
+}
+
+function updateTreeSummary() {
+  const el = document.getElementById('cbv-tree-summary');
+  if (!el) return;
+  if (!treeNodes.size || treeCompleteness === 'building' || treeCompleteness === 'empty') {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  const branchCount = countLeaves();
+  el.hidden = false;
+  el.textContent = `${treeNodes.size} nodes · ${branchCount} ${branchCount === 1 ? 'branch' : 'branches'}`;
 }
 
 function updateBuildButtonLabel() {
@@ -579,13 +634,47 @@ function updateBuildButtonLabel() {
   if (!btn) return;
   const label = btn.querySelector('span');
   if (label) label.textContent = treeCompleteness === 'full' ? 'Update Tree' : 'Build Full Tree';
-  btn.style.setProperty('--cbv-tool-expand-width', treeCompleteness === 'full' ? '122px' : '142px');
-  btn.style.setProperty('--cbv-tool-label-max-width', treeCompleteness === 'full' ? '78px' : '96px');
   btn.classList.toggle('cbv-build-fab-attention', treeCompleteness === 'partial');
-  btn.classList.toggle('cbv-tool-fab-pinned', treeCompleteness === 'partial' || (treeCompleteness === 'full' && treeSource === 'snapshot'));
+  btn.classList.toggle('cbv-tool-fab-pinned', treeCompleteness === 'empty' || treeCompleteness === 'partial' || (treeCompleteness === 'full' && treeSource === 'snapshot'));
   btn.title = treeCompleteness === 'full'
     ? 'Update the full tree by traversing branches again'
     : 'Build full tree by traversing all branches';
+  syncToolFabWidth(btn);
+}
+
+function getToolFabMeasureCanvas() {
+  if (!toolFabMeasureCanvas) toolFabMeasureCanvas = document.createElement('canvas');
+  return toolFabMeasureCanvas;
+}
+
+function measureToolFabLabelWidth(button) {
+  const label = button?.querySelector('span');
+  if (!label) return 0;
+  const text = (label.textContent || '').trim();
+  if (!text) return 0;
+
+  const ctx = getToolFabMeasureCanvas().getContext('2d');
+  if (!ctx) return Math.ceil(label.scrollWidth || 0);
+
+  const style = window.getComputedStyle(button);
+  ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  return Math.ceil(ctx.measureText(text).width);
+}
+
+function syncToolFabWidth(button) {
+  if (!button || button.classList.contains('cbv-menu-trigger')) return;
+  const labelWidth = measureToolFabLabelWidth(button);
+  const collapsedWidth = 34;
+  const horizontalPadding = labelWidth > 0 ? 12 : 0;
+  const gap = labelWidth > 0 ? 5 : 0;
+  const extraBuffer = 1;
+  const expandedWidth = Math.max(collapsedWidth, collapsedWidth + labelWidth + gap + horizontalPadding + extraBuffer);
+  button.style.setProperty('--cbv-tool-label-max-width', `${labelWidth}px`);
+  button.style.setProperty('--cbv-tool-expand-width', `${expandedWidth}px`);
+}
+
+function syncAllToolFabWidths() {
+  document.querySelectorAll('.cbv-tool-fab').forEach(syncToolFabWidth);
 }
 
 function updatePartialBanner() {
@@ -642,15 +731,39 @@ function resetTreeState() {
   renderedExpandedGroups = [];
   expandedChainStarts.clear();
   layoutMap.clear();
-  treeCompleteness = 'partial';
+  treeCompleteness = 'empty';
   treeSource = 'live';
   treeDataUrl = currentPageUrl || '';
   lastDiagnostics = null;
   document.getElementById('cbv-canvas')?.remove();
   const emptyEl = document.getElementById('cbv-empty');
   if (emptyEl) emptyEl.style.display = '';
+  setSupportedPageEmptyState(isSupportedPlatform(currentPlatform) ? 'supported' : 'unsupported');
+  updateTreeSummary();
   updateExpandToggleButton();
   updateDiagnosticsActions();
+}
+
+function isSupportedPlatform(platform) {
+  return platform === 'chatgpt' || platform === 'claude';
+}
+
+function setSupportedPageEmptyState(mode = 'supported') {
+  const titleEl = document.getElementById('cbv-empty-title');
+  const subEl = document.getElementById('cbv-empty-sub');
+  if (!titleEl || !subEl) return;
+  if (mode === 'unsupported') {
+    titleEl.textContent = 'Unsupported page';
+    subEl.innerHTML = 'Branch Visualizer only works on <strong>ChatGPT</strong> and <strong>Claude</strong> chat pages.';
+    return;
+  }
+  if (mode === 'empty') {
+    titleEl.textContent = 'No active tab';
+    subEl.innerHTML = 'Select a <strong>ChatGPT</strong> or <strong>Claude</strong> chat to view its branch tree.';
+    return;
+  }
+  titleEl.textContent = 'No conversation tree yet';
+  subEl.innerHTML = 'Open a ChatGPT or Claude chat,<br>then click <strong>Build</strong>.';
 }
 
 function hideTreeLoading(force = false) {
@@ -2148,7 +2261,7 @@ async function restoreFromStorage(expectedUrl = currentPageUrl) {
     setActivePathState(saved.activePath || []);
     setVisiblePathState([]);
     expandedChainStarts.clear();
-    setStatus(`Restored ${treeNodes.size} nodes (saved ${timeAgo(saved.savedAt)})`, 'ok');
+    setStatus(`Snapshot restored · saved ${timeAgo(saved.savedAt)}`, 'ok');
     collapseByDefault();
     requestAnimationFrame(fitView);
   } catch (_) { /* storage unavailable — fine */ }
