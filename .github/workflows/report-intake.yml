@@ -1,0 +1,84 @@
+name: Extension Report Intake
+
+on:
+  repository_dispatch:
+    types:
+      - extension_breakage_report
+      - extension_user_report
+
+jobs:
+  intake:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Upsert issue from incoming report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const payload = context.payload.client_payload || {};
+            const report = payload.report || {};
+            const diagnostics = report.diagnostics || {};
+            const digest = payload.digest || 'unknown';
+            const marker = `<!-- cbv-report-digest:${digest} -->`;
+            const labels = [
+              'extension-report',
+              report.type === 'user_report' ? 'user-report' : 'auto-report',
+            ];
+            if ((diagnostics.probe?.broken || []).length) labels.push('selector-broken');
+
+            const titlePrefix = report.type === 'user_report' ? '[USER]' : '[AUTO]';
+            const title = `${titlePrefix} ${diagnostics.platform || 'unknown'} ${diagnostics.reason || 'breakage'}`;
+
+            const body = [
+              marker,
+              '## Report Summary',
+              '',
+              `- Type: \`${report.type || 'auto_probe'}\``,
+              `- Platform: \`${diagnostics.platform || 'unknown'}\``,
+              `- Reason: \`${diagnostics.reason || 'unknown'}\``,
+              `- URL: ${diagnostics.url || report.tabUrl || 'unknown'}`,
+              `- Broken probes: \`${(diagnostics.probe?.broken || []).join(', ') || 'none'}\``,
+              '',
+              '## Diagnostics',
+              '',
+              '```json',
+              JSON.stringify(report, null, 2),
+              '```',
+            ].join('\n');
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'extension-report',
+              per_page: 100,
+            });
+
+            const existing = issues.find(issue => (issue.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: [
+                  'A matching report was received again.',
+                  '',
+                  `- Event: \`${context.payload.action || context.payload.repository_dispatch?.event_type || context.payload.client_payload?.report?.type || 'repository_dispatch'}\``,
+                  `- Reported at: ${new Date().toISOString()}`,
+                  '',
+                  '```json',
+                  JSON.stringify(report, null, 2),
+                  '```',
+                ].join('\n'),
+              });
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels,
+            });

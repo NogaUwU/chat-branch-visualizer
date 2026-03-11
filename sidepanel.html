@@ -20,7 +20,6 @@
         <span class="cbv-partial-banner-text">This is a partial tree</span>
       </div>
     </div>
-
     <div class="cbv-actions"></div>
   </header>
 
@@ -69,6 +68,15 @@
       <svg width="13" height="13" viewBox="0 -960 960 960" fill="none" aria-hidden="true"><path fill="currentColor" d="M180-120q-24 0-42-18t-18-42v-600q0-24 18-42t42-18h249q12.75 0 21.38 8.68 8.62 8.67 8.62 21.5 0 12.82-8.62 21.32-8.63 8.5-21.38 8.5H180v600h600v-249q0-12.75 8.68-21.38 8.67-8.62 21.5-8.62 12.82 0 21.32 8.62 8.5 8.63 8.5 21.38v249q0 24-18 42t-42 18H180Zm600-617L403-360q-9 9-21 8.5t-21-9.5q-9-9-9-21t9-21l377-377H549q-12.75 0-21.37-8.68-8.63-8.67-8.63-21.5 0-12.82 8.63-21.32 8.62-8.5 21.37-8.5h261q12.75 0 21.38 8.62Q840-822.75 840-810v261q0 12.75-8.68 21.37-8.67 8.63-21.5 8.63-12.82 0-21.32-8.63-8.5-8.62-8.5-21.37v-188Z"/></svg>
       <span>Viewer</span>
     </button>
+    <details id="cbv-more-menu" class="cbv-menu cbv-tool-menu" hidden>
+      <summary class="cbv-tool-fab cbv-menu-trigger" aria-label="More actions">
+        <svg width="16" height="16" viewBox="0 -960 960 960" fill="none" aria-hidden="true"><path fill="currentColor" d="M480-120q-33 0-56.5-23.5T400-200q0-33 23.5-56.5T480-280q33 0 56.5 23.5T560-200q0 33-23.5 56.5T480-120Zm0-280q-33 0-56.5-23.5T400-480q0-33 23.5-56.5T480-560q33 0 56.5 23.5T560-480q0 33-23.5 56.5T480-400Zm0-280q-33 0-56.5-23.5T400-760q0-33 23.5-56.5T480-840q33 0 56.5 23.5T560-760q0 33-23.5 56.5T480-680Z"/></svg>
+      </summary>
+      <div class="cbv-menu-panel cbv-tool-menu-panel">
+        <button id="btn-copy-diagnostics" class="cbv-btn cbv-menu-item" type="button">Copy Diagnostics</button>
+        <button id="btn-report-breakage" class="cbv-btn cbv-menu-item" type="button">Report Breakage</button>
+      </div>
+    </details>
     </div>
     <div id="cbv-loading" hidden>
       <div class="cbv-loading-card">
@@ -106,6 +114,7 @@
   </div>
 </div>
 <script src="platform-config.js"></script>
+<script src="reporting-config.js"></script>
 <script src="sidepanel.js"></script>
 </body>
 </html>

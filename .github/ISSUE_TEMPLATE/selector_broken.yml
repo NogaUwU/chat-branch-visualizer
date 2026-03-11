@@ -1,0 +1,32 @@
+name: Selector Broken
+description: Report DOM drift or selector breakage in ChatGPT / Claude parsing.
+title: "[Breakage] "
+labels:
+  - selector-broken
+body:
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - ChatGPT
+        - Claude
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What broke?
+      description: Describe the visible symptom briefly.
+      placeholder: Tree shows 0 nodes, branch switch is skipped, two trees are mixed together...
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics JSON
+      description: Paste the copied diagnostics blob from the extension.
+      render: json
+    validations:
+      required: true

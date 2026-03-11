@@ -1,41 +1,110 @@
 # chat-branch-visualizer-mvp
 
-MVP Chrome extension for **conversation branch visualization + fast hover preview** on ChatGPT / Claude pages.
+Chrome extension for visualizing ChatGPT and Claude conversation branches in a native side panel, with diagnostics and automation hooks for DOM drift.
 
-## What this MVP does
+## Core features
 
-- Builds a baseline linear conversation node list from visible messages
-- Lets you create manual branches from any node (`+Branch`)
-- Shows a simple tree in a floating side panel
-- **Hover node = temporary preview (quick switch)**
-- **Click node = pin as active node**
-- `Esc` returns from preview to active node
+- Shared tree renderer for ChatGPT and Claude
+- Platform-specific DOM parsers in `content.js`
+- Full-tree traversal with branch navigation
+- Partial/full snapshot state restoration
+- Selector probe and diagnostics capture when parsing degrades
 
-## Install
+## Local install
 
 1. Open `chrome://extensions`
 2. Enable **Developer mode**
 3. Click **Load unpacked**
 4. Select this folder
-5. Open ChatGPT or Claude conversation page
+5. Open a ChatGPT or Claude conversation page
 
-## Usage
+## Diagnostics pipeline
 
-- Click **Refresh** to rebuild nodes from current visible chat
-- Click `+Branch` near a node to fork from that node
-- Hover nodes in panel to preview that depth/branch instantly
-- Click a node to set active branch point
-- Press `Esc` to cancel preview
+When the parser hits one of these conditions:
 
-## Notes / limitations
+- `no_turns_detected`
+- `build_error`
+- `branch_navigation_warning`
 
-- This is a DOM-based MVP; selectors may break when platform UI changes
-- Branches are local and stored in `chrome.storage.local`
-- Tree layout is list-based for speed; can later swap to React Flow/D3
+the extension captures a diagnostics payload with:
 
-## Next steps
+- `platform`
+- `url`
+- `extensionVersion`
+- `selectorVersion`
+- `probe.hits`
+- `probe.broken`
+- `activePath`
+- `visiblePath`
+- `domSummary`
 
-- Better auto branch detection (edit/regenerate hooks)
-- Real graph canvas (React Flow)
-- Cross-tab sync and export/import JSON
-- Diff view for branch comparison
+The payload is sent to the side panel as `PROBE_RESULT`. If reporting is enabled, `background.js` also auto-posts it to your Vercel endpoint.
+
+## Selector registry
+
+Key selectors live in [`selectors.json`](./selectors.json). The runtime parser still keeps behavior logic in code, but probe tooling and automation both read from this registry.
+
+## Reporting setup
+
+### 1. Configure the extension client
+
+Edit [`reporting-config.js`](./reporting-config.js):
+
+- `enabled`: turn backend reporting on/off
+- `endpoint`: your deployed Vercel endpoint, for example `https://your-app.vercel.app/api/reports`
+- `publicKey`: optional low-trust identifier checked by the API
+- `autoSend`: auto-submit diagnostics from `background.js`
+- `manualReports`: keep `false` for now if you want feedback UI hidden
+
+### 2. Deploy the Vercel API
+
+This repo now includes:
+
+- [`api/reports.js`](./api/reports.js)
+- [`api/health.js`](./api/health.js)
+
+Required Vercel environment variables:
+
+- `GITHUB_TOKEN`
+- `GITHUB_REPOSITORY`
+
+Optional:
+
+- `REPORT_PUBLIC_KEY`
+
+`api/reports.js` accepts extension payloads, sanitizes them, and triggers a GitHub `repository_dispatch` event:
+
+- `extension_breakage_report`
+- `extension_user_report`
+
+## GitHub automation
+
+### Scheduled probe
+
+[`probe.yml`](./.github/workflows/probe.yml) runs Playwright against ChatGPT / Claude using stored session cookies and opens an issue if selectors drift.
+
+Secrets used by the probe workflow:
+
+- `TEST_CHATGPT_URL`
+- `TEST_CLAUDE_URL`
+- `CHATGPT_SESSION_COOKIE`
+- `CLAUDE_SESSION_COOKIE`
+
+### Report intake
+
+[`report-intake.yml`](./.github/workflows/report-intake.yml) listens for `repository_dispatch` and upserts an issue for incoming extension reports.
+
+### Reviewer
+
+[`review.yml`](./.github/workflows/review.yml) adds a lightweight structural review comment on auto-fix PRs.
+
+## Local automation scripts
+
+- `npm run probe`
+- `npm run review`
+- `npm run patch`
+- `npm run check:reporting`
+
+## Privacy / scope
+
+The reporting path is designed to send minimal diagnostics, not full chat transcripts. The captured text is limited to short signatures and DOM snippets needed for selector debugging.

@@ -11,7 +11,48 @@
   const DEBOUNCE_MS   = 180;
   const VIEWPORT_SYNC_MS = 100;
   const BUILD_TIMEOUT_MS = 45000;
+  const DIAGNOSTIC_SNIPPET_LIMIT = 6;
   const PLATFORM      = detectPlatform();
+  const EXT_VERSION   = chrome.runtime.getManifest().version;
+  const DEFAULT_SELECTORS = {
+    version: EXT_VERSION,
+    lastVerified: null,
+    platforms: {
+      chatgpt: {
+        turns: [
+          "article[data-testid^='conversation-turn-']",
+          '[data-message-id]',
+        ],
+        turnRoleAttr: 'data-turn',
+        messageIdAttr: 'data-message-id',
+        branchCounter: { type: 'regex', pattern: '^\\d+\\s*/\\s*\\d+$' },
+        branchPrev: ["[aria-label*='prev' i]", "[aria-label*='previous' i]", "[aria-label*='earlier' i]"],
+        branchNext: ["[aria-label*='next' i]", "[aria-label*='later' i]"],
+        scrollHost: ['main'],
+      },
+      claude: {
+        humanTurn: [
+          "[data-testid='user-message']",
+          "[data-testid='human-turn']",
+          "[class*='font-user-message']",
+          "[class*='human-turn']",
+          "[class*='HumanTurn']",
+        ],
+        assistantTurn: [
+          "[data-testid='assistant-turn']",
+          "[data-testid='assistant-message']",
+          '.font-claude-response',
+          '.font-claude-response-body',
+          '.standard-markdown',
+          "[class*='font-claude-message']",
+        ],
+        branchCounter: { type: 'regex', pattern: '^\\d+\\s*/\\s*\\d+$' },
+        branchPrev: ["[aria-label*='prev' i]", "[aria-label*='previous' i]", "[aria-label*='上一']"],
+        branchNext: ["[aria-label*='next' i]", "[aria-label*='later' i]", "[aria-label*='下一']"],
+        scrollHost: ['main'],
+      },
+    },
+  };
 
   let mutTimer  = null;
   let observer  = null;
@@ -24,6 +65,9 @@
   let lastStateSig = '';
   let lastVisibleSig = '';
   let lastUrl = location.href;
+  let selectorConfig = DEFAULT_SELECTORS;
+  let lastDiagnostics = null;
+  let lastDiagnosticSig = '';
 
   // ── Platform ────────────────────────────────────────────────────────────────
   function detectPlatform() {
@@ -35,6 +79,7 @@
 
   function init() {
     injectHighlightStyle();
+    loadSelectorConfig().catch(() => {});
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       handleMessage(msg).then(sendResponse);
       return true; // async
@@ -73,6 +118,15 @@
     return { ...msg, url: msg.url || location.href };
   }
 
+  async function loadSelectorConfig() {
+    try {
+      const response = await fetch(chrome.runtime.getURL('selectors.json'));
+      if (!response.ok) return;
+      const next = await response.json();
+      if (next?.platforms) selectorConfig = next;
+    } catch (_) {}
+  }
+
 function makePathEntry(turn) {
   return {
       id: turn.id || makeNodeId(turn.turnIndex, turn.branchIndex, turn.domId),
@@ -81,6 +135,147 @@ function makePathEntry(turn) {
       role: turn.role,
       textSig: textSignature(turn.text),
     };
+  }
+
+  function runSelectorProbe(platform = PLATFORM) {
+    const cfg = selectorConfig?.platforms?.[platform];
+    if (!cfg) {
+      return {
+        platform,
+        version: selectorConfig?.version || null,
+        ts: Date.now(),
+        url: location.href,
+        hits: {},
+        broken: ['platform-config-missing'],
+      };
+    }
+
+    const hits = {};
+    for (const [key, sel] of Object.entries(cfg)) {
+      hits[key] = probeSelectorValue(sel);
+    }
+
+    const broken = Object.entries(hits)
+      .filter(([, value]) => isProbeValueBroken(value))
+      .map(([key]) => key);
+
+    return {
+      platform,
+      version: selectorConfig?.version || null,
+      ts: Date.now(),
+      url: location.href,
+      hits,
+      broken,
+    };
+  }
+
+  function probeSelectorValue(sel) {
+    if (typeof sel === 'string') return safeQueryCount(sel);
+    if (Array.isArray(sel)) return sel.map(entry => probeSelectorValue(entry));
+    if (sel?.type === 'regex') return countRegexTextMatches(sel.pattern);
+    if (sel && typeof sel === 'object' && typeof sel.selector === 'string') {
+      return safeQueryCount(sel.selector);
+    }
+    return null;
+  }
+
+  function safeQueryCount(selector) {
+    try {
+      return document.querySelectorAll(selector).length;
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  function countRegexTextMatches(pattern) {
+    try {
+      const regex = new RegExp(pattern);
+      let count = 0;
+      document.querySelectorAll('span, div, p, button').forEach(el => {
+        const text = (el.textContent || '').trim();
+        if (text && regex.test(text)) count += 1;
+      });
+      return count;
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  function isProbeValueBroken(value) {
+    if (Array.isArray(value)) return value.every(entry => isProbeValueBroken(entry));
+    return typeof value === 'number' ? value <= 0 : value == null;
+  }
+
+  function maybeReportBreakage(reason, extra = {}) {
+    const turns = extra.turns || [];
+    const probe = runSelectorProbe(PLATFORM);
+    const diagnostics = {
+      type: 'selector-breakage',
+      reason,
+      platform: PLATFORM,
+      platformLabel: cbvFormatPlatformName(PLATFORM),
+      extensionVersion: EXT_VERSION,
+      selectorVersion: selectorConfig?.version || null,
+      url: location.href,
+      ts: Date.now(),
+      turnCount: turns.length,
+      activePath: readCurrentPath().slice(-4).map(toDiagnosticTurn),
+      visiblePath: readVisiblePath().slice(-4).map(toDiagnosticTurn),
+      probe,
+      extra,
+      domSummary: collectDomSummary(),
+    };
+    const sig = JSON.stringify({
+      reason,
+      url: diagnostics.url,
+      broken: diagnostics.probe.broken,
+      turnCount: diagnostics.turnCount,
+    });
+    if (sig === lastDiagnosticSig) return diagnostics;
+    lastDiagnosticSig = sig;
+    lastDiagnostics = diagnostics;
+    sendToPanel({ type: 'PROBE_RESULT', diagnostics });
+    return diagnostics;
+  }
+
+  function toDiagnosticTurn(turn) {
+    return {
+      id: turn.id || null,
+      turnIndex: turn.turnIndex,
+      branchIndex: turn.branchIndex,
+      role: turn.role,
+      text: textSignature(turn.text || turn.textSig || ''),
+    };
+  }
+
+  function collectDomSummary() {
+    const selectors = {
+      turnArticles: "article[data-testid^='conversation-turn-']",
+      messageIds: '[data-message-id]',
+      userMessages: "[data-testid='user-message'], [class*='font-user-message']",
+      assistantTurns: "[data-testid='assistant-turn'], [data-testid='assistant-message'], .font-claude-response",
+      branchCounters: 'span, div',
+    };
+    return Object.entries(selectors).map(([label, selector]) => {
+      const nodes = selector === 'span, div'
+        ? [...document.querySelectorAll(selector)].filter(el => /^\d+\s*\/\s*\d+$/.test((el.textContent || '').trim())).slice(0, DIAGNOSTIC_SNIPPET_LIMIT)
+        : [...document.querySelectorAll(selector)].slice(0, DIAGNOSTIC_SNIPPET_LIMIT);
+      return {
+        label,
+        count: selector === 'span, div' ? nodes.length : safeQueryCount(selector),
+        samples: nodes.map(el => ({
+          tag: el.tagName,
+          testid: el.getAttribute('data-testid') || '',
+          cls: String(el.className || '').slice(0, 120),
+          text: textSignature(el.innerText || el.textContent || ''),
+        })),
+      };
+    });
+  }
+
+  function diagnosticsText(diagnostics = lastDiagnostics) {
+    if (!diagnostics) return '';
+    return JSON.stringify(diagnostics, null, 2);
   }
 
   // ── CANCEL command ────────────────────────────────────────────────────────────
@@ -125,6 +320,11 @@ function makePathEntry(turn) {
         saveToStorage(treeNodes, activePath);
         return { ok: true, partial: true };
       }
+      maybeReportBreakage('build_error', {
+        phase: 'build',
+        message: reason,
+        cancelled,
+      });
       sendToPanel({ type: cancelled ? 'BUILD_CANCELLED' : 'BUILD_ERROR', message: reason });
       return { ok: false };
     }
@@ -200,6 +400,12 @@ function makePathEntry(turn) {
           sendToPanel({
             type:    'BUILD_WARNING',
             message: `Turn ${turnIdx + 1}: could not reach branch ${b}/${branchTotal} — skipped`,
+          });
+          maybeReportBreakage('branch_navigation_warning', {
+            phase: 'build',
+            turnIndex: turnIdx,
+            branchIndex: b,
+            branchTotal,
           });
           continue;
         }
@@ -770,6 +976,10 @@ function makePathEntry(turn) {
   function syncStateToPanel(force = false) {
     const turns = serializeTurns(readRawTurns());
     if (!turns.length) {
+      maybeReportBreakage('no_turns_detected', {
+        phase: 'sync',
+        force,
+      });
       sendToPanel({ type: 'CONVERSATION_LOADING' });
       return;
     }
@@ -788,6 +998,8 @@ function makePathEntry(turn) {
         lastUrl = location.href;
         lastStateSig = '';
         lastVisibleSig = '';
+        lastDiagnostics = null;
+        lastDiagnosticSig = '';
         sendToPanel({ type: 'PAGE_READY', platform: PLATFORM, url: location.href });
         syncStateToPanel(true);
       }

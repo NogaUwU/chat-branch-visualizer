@@ -257,6 +257,10 @@ html, body {
   position: relative;
 }
 
+.cbv-tool-menu {
+  align-self: flex-end;
+}
+
 .cbv-menu > summary {
   list-style: none;
 }
@@ -267,8 +271,17 @@ html, body {
 
 .cbv-menu-trigger {
   width: 28px;
+  min-width: 28px;
   justify-content: center;
   padding: 0;
+}
+
+.cbv-tool-menu > summary.cbv-menu-trigger,
+.cbv-tool-menu > summary.cbv-menu-trigger:hover,
+.cbv-tool-menu > summary.cbv-menu-trigger:focus-visible {
+  width: 38px;
+  min-width: 38px;
+  justify-content: center;
 }
 
 .cbv-menu[open] .cbv-menu-trigger {
@@ -293,9 +306,18 @@ html, body {
   z-index: 20;
 }
 
+.cbv-tool-menu-panel {
+  top: auto;
+  right: calc(100% + 10px);
+  min-width: 220px;
+  padding: 10px;
+  border-radius: 14px;
+  box-shadow: 0 16px 36px rgba(0,0,0,.18);
+}
+
 .cbv-menu-item {
   width: 100%;
-  justify-content: center;
+  justify-content: flex-start;
   height: 30px;
   padding: 0 10px;
   border-radius: 10px;

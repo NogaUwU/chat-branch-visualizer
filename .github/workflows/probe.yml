@@ -1,0 +1,71 @@
+name: Selector Health Probe
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install probe deps
+        run: npm install --no-fund --no-audit
+
+      - name: Install Playwright browser
+        run: npx playwright install chromium
+
+      - name: Run selector probe
+        env:
+          CHATGPT_SESSION_COOKIE: ${{ secrets.CHATGPT_SESSION_COOKIE }}
+          CLAUDE_SESSION_COOKIE: ${{ secrets.CLAUDE_SESSION_COOKIE }}
+          TEST_CHATGPT_URL: ${{ secrets.TEST_CHATGPT_URL }}
+          TEST_CLAUDE_URL: ${{ secrets.TEST_CLAUDE_URL }}
+        run: npm run probe
+
+      - name: Upload probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-result
+          path: probe-result.json
+
+      - name: Open breakage issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'probe-result.json';
+            if (!fs.existsSync(path)) return;
+            const payload = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const broken = (payload.results || []).filter(result => (result.broken || []).length);
+            const titlePlatform = broken.map(item => item.platform).join(', ') || 'unknown';
+            const title = `[AUTO] Selector breakage detected — ${titlePlatform} @ ${new Date().toISOString().slice(0, 10)}`;
+            const body = [
+              '## Probe Result',
+              '',
+              '```json',
+              JSON.stringify(payload, null, 2),
+              '```',
+              '',
+              'Workflow artifact `probe-result` contains the raw result JSON.'
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['selector-broken', 'auto']
+            });

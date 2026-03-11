@@ -3,11 +3,12 @@
   "name": "Chat Branch Visualizer",
   "version": "0.2.0",
   "description": "Visualize conversation branches in ChatGPT/Claude as a native sidebar.",
-  "permissions": ["storage", "sidePanel", "tabs"],
+  "permissions": ["storage", "sidePanel", "tabs", "clipboardWrite"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
-    "https://claude.ai/*"
+    "https://claude.ai/*",
+    "https://*.vercel.app/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -31,8 +32,14 @@
         "https://chat.openai.com/*",
         "https://claude.ai/*"
       ],
-      "js": ["platform-config.js", "content.js"],
+      "js": ["platform-config.js", "reporting-config.js", "content.js"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["selectors.json"],
+      "matches": ["<all_urls>"]
     }
   ],
   "icons": {

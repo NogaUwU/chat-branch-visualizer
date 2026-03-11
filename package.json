@@ -1,0 +1,13 @@
+{
+  "name": "chat-branch-visualizer-dev",
+  "private": true,
+  "scripts": {
+    "probe": "node scripts/probe.js",
+    "review": "node scripts/review-pr.js",
+    "patch": "node scripts/openclaw-patch.js",
+    "check:reporting": "node --check api/reports.js && node --check api/health.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.52.0"
+  }
+}

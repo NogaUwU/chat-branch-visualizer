@@ -23,6 +23,7 @@ let currentPlatform = 'unknown';
 let panelPort = null;
 let treeSource = 'live';
 let treeDataUrl = '';
+let lastDiagnostics = null;
 
 // ── Camera ────────────────────────────────────────────────────────────────────
 let cam = { x: 20, y: 20, scale: 1 };
@@ -105,8 +106,12 @@ let layoutMap = new Map();   // nodeId → { x, y, w }
   document.getElementById('btn-build-cancel').addEventListener('click', closeBuildModal);
   document.getElementById('btn-build-confirm').addEventListener('click', confirmBuild);
   document.getElementById('cbv-zoom-slider').addEventListener('input', onZoomSliderInput);
+  document.getElementById('btn-copy-diagnostics').addEventListener('click', copyDiagnostics);
+  document.getElementById('btn-report-breakage').addEventListener('click', reportBreakage);
   updateExpandToggleButton();
   updateTreeCompletenessBadge();
+  updateDiagnosticsActions();
+  initMoreMenu();
 
   initInteraction();
   syncZoomSlider();
@@ -273,6 +278,14 @@ function onContentMessage(msg) {
     case 'BUILD_WARNING':
       // Non-fatal: show warning in status but keep building
       setStatus(`Warning: ${msg.message}`, 'working');
+      break;
+
+    case 'PROBE_RESULT':
+      lastDiagnostics = msg.diagnostics || null;
+      updateDiagnosticsActions();
+      if (lastDiagnostics?.probe?.broken?.length) {
+        setStatus(`Selector mismatch detected · ${lastDiagnostics.probe.broken.join(', ')}`, 'error');
+      }
       break;
 
     case 'NAV_DONE':
@@ -632,10 +645,12 @@ function resetTreeState() {
   treeCompleteness = 'partial';
   treeSource = 'live';
   treeDataUrl = currentPageUrl || '';
+  lastDiagnostics = null;
   document.getElementById('cbv-canvas')?.remove();
   const emptyEl = document.getElementById('cbv-empty');
   if (emptyEl) emptyEl.style.display = '';
   updateExpandToggleButton();
+  updateDiagnosticsActions();
 }
 
 function hideTreeLoading(force = false) {
@@ -1913,6 +1928,99 @@ function assistantDisplayName() {
 
 function detectCurrentPlatform() {
   return currentPlatform !== 'unknown' ? currentPlatform : cbvDetectPlatform(currentPageUrl);
+}
+
+function updateDiagnosticsActions() {
+  const hasDiagnostics = Boolean(lastDiagnostics);
+  const reporting = typeof cbvGetReportingConfig === 'function' ? cbvGetReportingConfig() : { manualReports: false };
+  const menu = document.getElementById('cbv-more-menu');
+  const copyBtn = document.getElementById('btn-copy-diagnostics');
+  const reportBtn = document.getElementById('btn-report-breakage');
+  if (menu) {
+    menu.hidden = !(reporting.manualReports && hasDiagnostics);
+    if (menu.hidden) menu.open = false;
+  }
+  if (copyBtn) copyBtn.dataset.ready = hasDiagnostics ? 'true' : 'false';
+  if (reportBtn) reportBtn.dataset.ready = hasDiagnostics ? 'true' : 'false';
+}
+
+async function copyDiagnostics() {
+  if (!lastDiagnostics) {
+    setStatus('No diagnostics captured yet', 'idle');
+    closeMoreMenu();
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(lastDiagnostics, null, 2));
+    setStatus('Diagnostics copied', 'ok');
+  } catch (_) {
+    setStatus('Failed to copy diagnostics', 'error');
+  }
+  closeMoreMenu();
+}
+
+async function reportBreakage() {
+  if (!lastDiagnostics) {
+    setStatus('No diagnostics captured yet', 'idle');
+    closeMoreMenu();
+    return;
+  }
+  const reporting = typeof cbvGetReportingConfig === 'function' ? cbvGetReportingConfig() : { enabled: false, endpoint: '' };
+  if (reporting.enabled && reporting.endpoint) {
+    try {
+      const result = await chrome.runtime.sendMessage({
+        type: 'SUBMIT_REPORT',
+        reportType: 'user_report',
+        diagnostics: lastDiagnostics,
+      });
+      if (result?.ok) {
+        setStatus('Diagnostics submitted', 'ok');
+      } else {
+        throw new Error(result?.error || 'submit_failed');
+      }
+    } catch (_) {
+      await copyDiagnostics();
+      downloadDiagnostics();
+      setStatus('Diagnostics copied and downloaded', 'ok');
+    }
+  } else {
+    await copyDiagnostics();
+    downloadDiagnostics();
+    setStatus('Diagnostics copied and downloaded', 'ok');
+  }
+  closeMoreMenu();
+}
+
+function closeMoreMenu() {
+  const menu = document.getElementById('cbv-more-menu');
+  if (menu) menu.open = false;
+}
+
+function initMoreMenu() {
+  document.addEventListener('click', event => {
+    const menu = document.getElementById('cbv-more-menu');
+    if (!menu?.open) return;
+    if (menu.contains(event.target)) return;
+    closeMoreMenu();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeMoreMenu();
+  });
+}
+
+function downloadDiagnostics() {
+  if (!lastDiagnostics) return;
+  const stamp = new Date(lastDiagnostics.ts || Date.now()).toISOString().replace(/[:.]/g, '-');
+  const platform = (lastDiagnostics.platform || 'unknown').toLowerCase();
+  const blob = new Blob([JSON.stringify(lastDiagnostics, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `cbv-breakage-${platform}-${stamp}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 // Unique ID counter for SVG clipPath elements
