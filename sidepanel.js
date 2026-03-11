@@ -92,10 +92,20 @@ function V_GAP() {
 // Fix 4: module-scope layout map (shared by renderTree + minimap + panToNode)
 let layoutMap = new Map();   // nodeId → { x, y, w }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
-(async () => {
+// ── Port connection (auto-reconnects when MV3 service worker restarts) ────────
+function connectPort() {
   panelPort = chrome.runtime.connect({ name: 'cbv-sidepanel' });
   panelPort.onMessage.addListener(onContentMessage);
+  panelPort.onDisconnect.addListener(() => {
+    panelPort = null;
+    connectPort();
+    if (currentTabId) panelPort.postMessage({ type: 'REGISTER', tabId: currentTabId });
+  });
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+(async () => {
+  connectPort();
 
   document.getElementById('btn-build').addEventListener('click', maybeStartBuild);
   document.getElementById('btn-cancel').addEventListener('click', () =>
@@ -1852,10 +1862,10 @@ function panToVisibleRange() {
   const contentW = maxX - minX || NW();
   const contentH = maxY - minY || NH();
   const targetScale = Math.min(
-    1.0,
+    1.3,
     (tw - PAD * 3) / contentW,
     (th - PAD * 3) / contentH
-  ) * 0.92;
+  ) * 0.88;
   cam.scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, targetScale));
 
   canvas.style.transition = 'transform 0.38s cubic-bezier(0.4,0,0.2,1)';
