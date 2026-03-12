@@ -2,7 +2,7 @@ name: Trigger Codex Review
 
 on:
   pull_request:
-    types: [opened, reopened, labeled]
+    types: [opened, reopened]
 
 jobs:
   trigger:
