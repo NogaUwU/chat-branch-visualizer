@@ -16,3 +16,5 @@
     return global.CBV_REPORTING_CONFIG;
   };
 })(typeof globalThis !== 'undefined' ? globalThis : self);
+
+// NOTE: temporary maintenance comment for workflow verification.
