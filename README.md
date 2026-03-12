@@ -76,17 +76,19 @@ Users control reporting via the **⋯ menu → Send diagnostics** toggle. It is 
 
 ### Reporting pipeline
 
+When breakage is detected and the user has opted in, a report flows through:
+
 ```
-User opts in via ⋯ menu → Send diagnostics toggle
-  └─ Extension detects breakage (content.js)
-       └─ background.js deduplicates + sanitizes
-            └─ POST ──▶ api/reports.js (Vercel)
-                             └─ GitHub repository_dispatch
-                                  └─ report-intake.yml
-                                       ├─ auto-report: buffer until 3 identical reports → visible issue
-                                       └─ user-report: immediately visible issue
-                                            └─ OpenClaw opens fix PR
-                                                 └─ Codex reviews → human approves → auto-merge
+content.js detects selector breakage / build error
+  └─ PROBE_RESULT → background.js
+       ├─ Consent check (cbv_consent.autoSend must be true)
+       ├─ Deduplication (same platform+reason+broken selectors+url within 30 min → skip)
+       └─ POST ──▶ api/reports.js (Vercel)
+                        └─ repository_dispatch: extension_breakage_report
+                             └─ report-intake.yml
+                                  └─ Buffer: 3 identical reports → promoted to visible issue
+                                       └─ OpenClaw opens fix PR (auto-fix label)
+                                            └─ Codex reviews → human approves → auto-merge
 ```
 
 ### GitHub Actions workflows
