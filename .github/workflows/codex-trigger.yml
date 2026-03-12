@@ -1,0 +1,21 @@
+name: Trigger Codex Review
+
+on:
+  pull_request:
+    types: [opened, reopened, labeled]
+
+jobs:
+  trigger:
+    if: contains(github.event.pull_request.labels.*.name, 'auto-fix')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.FUUGAMO_PAT }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: '@codex Please review this PR.',
+            });
