@@ -1,0 +1,36 @@
+name: Label Issue When PR Opened
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  label-issue:
+    if: contains(github.event.pull_request.labels.*.name, 'auto-fix')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const matches = body.match(/(?:closes?|fixes?|resolves?)\s+#(\d+)/gi) || [];
+            const issueNumbers = matches.map(m => parseInt(m.match(/#(\d+)/)[1]));
+
+            for (const num of issueNumbers) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  issue_number: num,
+                  labels: ['has-pr'],
+                });
+                console.log(`Labeled issue #${num} with has-pr`);
+              } catch (e) {
+                console.warn(`Could not label issue #${num}: ${e.message}`);
+              }
+            }

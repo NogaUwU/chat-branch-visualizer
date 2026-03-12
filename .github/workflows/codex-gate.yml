@@ -23,7 +23,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const CODEX_USER = 'FuugaMo';
+            const CODEX_USER = 'chatgpt-codex-connector';
 
             // ── Resolve PR and commit SHA ──────────────────────────────────────
             let pr, sha;
@@ -68,7 +68,7 @@ jobs:
                 // COMMENTED — parse the body for signals
                 const body = (review.body || '').toLowerCase();
                 const critical = ['critical', 'p0', 'security issue', 'breaking', 'incorrect'];
-                const positive = ['lgtm', 'no issues', 'looks good', 'no critical', 'approved'];
+                const positive = ['lgtm', 'no issues', 'looks good', 'no critical', 'approved', "didn't find any", 'no major issues', 'hooray'];
                 if (critical.some(k => body.includes(k))) {
                   state       = 'failure';
                   description = 'Codex flagged critical issues';
@@ -83,7 +83,7 @@ jobs:
               if (comment.user.login !== CODEX_USER) return;
               const body = (comment.body || '').toLowerCase();
               const critical = ['critical', 'p0', 'security issue', 'breaking', 'incorrect'];
-              const positive = ['lgtm', 'no issues', 'looks good', 'no critical', 'approved'];
+              const positive = ['lgtm', 'no issues', 'looks good', 'no critical', 'approved', "didn't find any", 'no major issues', 'hooray'];
               if (critical.some(k => body.includes(k))) {
                 state       = 'failure';
                 description = 'Codex flagged critical issues';
