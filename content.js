@@ -567,7 +567,7 @@ function makePathEntry(turn) {
         'main article',
       ];
       const candidates = dedupeElements(fallbackSelectors.flatMap(sel => [...document.querySelectorAll(sel)]))
-        .filter(el => isReadableTurnCandidate(el, { minText: 2 }));
+        .filter(el => isReadableTurnCandidate(el, { minText: 0 }));
       turns = candidates
         .filter(el => !candidates.some(other => other !== el && other.contains(el)))
         .sort((a, b) => rectTop(a) - rectTop(b));
@@ -647,7 +647,7 @@ function makePathEntry(turn) {
       '[class*="HumanTurn"]',
     ];
     return dedupeElements(selectTopLevelCandidates(selectors)
-      .filter(el => isReadableTurnCandidate(el, { minText: 2 })))
+      .filter(el => isReadableTurnCandidate(el, { minText: 0 })))
       .sort((a, b) => rectTop(a) - rectTop(b));
   }
 
