@@ -817,21 +817,21 @@ function makePathEntry(turn) {
   // Locates the X/Y branch counter and associated prev/next buttons.
   // Works for both ChatGPT (aria-label Chinese/English) and Claude.
   function findChatGPTBranchNav(container) {
-    return findBranchNavInside(container, { allowPositionalFallback: false });
+    return findBranchNavInside(container, { positionalFallback: 'sided' });
   }
 
   function findClaudeBranchNav(container) {
-    return findBranchNavInside(container, { allowPositionalFallback: true }) || findNearbyClaudeBranchNav(container);
+    return findBranchNavInside(container, { positionalFallback: 'nearest' }) || findNearbyClaudeBranchNav(container);
   }
 
-  function findBranchNavInside(root, { allowPositionalFallback = true } = {}) {
-    return resolveBranchNavFromCandidates(getBranchCounterCandidates(root), { allowPositionalFallback });
+  function findBranchNavInside(root, { positionalFallback = 'nearest' } = {}) {
+    return resolveBranchNavFromCandidates(getBranchCounterCandidates(root), { positionalFallback });
   }
 
   function findNearbyClaudeBranchNav(container) {
     const containerRect = container.getBoundingClientRect();
     const nearby = getBranchCounterCandidates(document)
-      .map(candidate => ({ candidate, nav: resolveBranchNavCandidate(candidate, { allowPositionalFallback: true }) }))
+      .map(candidate => ({ candidate, nav: resolveBranchNavCandidate(candidate, { positionalFallback: 'nearest' }) }))
       .filter(entry => entry.nav)
       .map(entry => {
         const rect = entry.candidate.el.getBoundingClientRect();
@@ -886,7 +886,7 @@ function makePathEntry(turn) {
     return null;
   }
 
-  function resolveBranchNavCandidate({ el, current, total }, { allowPositionalFallback = true } = {}) {
+  function resolveBranchNavCandidate({ el, current, total }, { positionalFallback = 'nearest' } = {}) {
     let node = el.parentElement;
     for (let lvl = 0; lvl < 6 && node; lvl++) {
       const btns = [...node.querySelectorAll('button')].filter(isVisibleButton);
@@ -905,29 +905,35 @@ function makePathEntry(turn) {
       });
       if (prevBtn && nextBtn) return { current, total, prevBtn, nextBtn };
 
-      if (allowPositionalFallback && btns.length >= 2) {
+      if (positionalFallback === 'sided' && btns.length >= 2) {
+        const counterRect = el.getBoundingClientRect();
+        const positional = cbvFindPositionalBranchButtons(
+          counterRect,
+          btns.map(button => ({ button, rect: button.getBoundingClientRect() }))
+        );
+        if (positional) return { current, total, ...positional };
+      }
+
+      if (positionalFallback === 'nearest' && btns.length >= 2) {
         const counterRect = el.getBoundingClientRect();
         const withDist = btns
-          .map(b => {
-            const r = b.getBoundingClientRect();
-            const centerX = (r.left + r.right) / 2;
-            const centerY = (r.top + r.bottom) / 2;
+          .map(button => {
+            const rect = button.getBoundingClientRect();
+            const centerX = (rect.left + rect.right) / 2;
+            const centerY = (rect.top + rect.bottom) / 2;
             const counterCenterX = (counterRect.left + counterRect.right) / 2;
             const counterCenterY = (counterRect.top + counterRect.bottom) / 2;
             return {
-              b,
+              button,
               dist: Math.abs(centerX - counterCenterX) + Math.abs(centerY - counterCenterY),
-              left: r.left,
+              left: rect.left,
             };
           })
           .sort((a, b) => a.dist - b.dist);
-
-        if (withDist.length >= 2) {
-          const [a, b] = withDist;
-          const leftBtn = a.left < b.left ? a.b : b.b;
-          const rightBtn = a.left < b.left ? b.b : a.b;
-          return { current, total, prevBtn: leftBtn, nextBtn: rightBtn };
-        }
+        const [first, second] = withDist;
+        const prevBtn = first.left < second.left ? first.button : second.button;
+        const nextBtn = first.left < second.left ? second.button : first.button;
+        return { current, total, prevBtn, nextBtn };
       }
 
       node = node.parentElement;
