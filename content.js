@@ -11,6 +11,7 @@
   const DEBOUNCE_MS   = 180;
   const VIEWPORT_SYNC_MS = 100;
   const BUILD_TIMEOUT_MS = 45000;
+  const EMPTY_TURN_CONFIRMATIONS = 3;
   const DIAGNOSTIC_SNIPPET_LIMIT = 6;
   const PLATFORM      = detectPlatform();
   const EXT_VERSION   = chrome.runtime.getManifest().version;
@@ -28,8 +29,10 @@
           "[data-testid='conversation-turn']",
           '[data-message-author-role]',
           '[data-message-id]',
+          '.conversation-turn',
+          '[data-role]',
         ],
-        turnRoleAttr: { type: 'attr', names: ['data-message-author-role', 'data-turn'] },
+        turnRoleAttr: { type: 'attr', names: ['data-message-author-role', 'data-turn', 'data-role'] },
         messageIdAttr: { type: 'attr', name: 'data-message-id' },
         branchCounter: { type: 'regex', pattern: '^\\d+\\s*/\\s*\\d+$' },
         branchPrev: ["[aria-label*='prev' i]", "[aria-label*='previous' i]", "[aria-label*='earlier' i]"],
@@ -47,6 +50,7 @@
           "[class*='human-turn']",
           "[class*='HumanTurn']",
           "[class*='UserMessage']",
+          '[data-is-user="true"]',
           '.font-user-message',
           '[class*="user-message"]',
         ],
@@ -57,6 +61,8 @@
           '.font-claude-response-body',
           '.standard-markdown',
           "[class*='font-claude-message']",
+          '[data-message-author-role="assistant"]',
+          '[data-is-user="false"]',
         ],
         branchCounter: { type: 'regex', pattern: '^\\d+\\s*/\\s*\\d+$' },
         branchPrev: ["[aria-label*='prev' i]", "[aria-label*='previous' i]", "[aria-label*='上一']"],
@@ -81,6 +87,7 @@
   let lastDiagnostics = null;
   let lastDiagnosticSig = '';
   let pageLoadStartedAt = Date.now();
+  let emptyTurnPolls = 0;
 
   // ── Platform ────────────────────────────────────────────────────────────────
   function detectPlatform() {
@@ -593,8 +600,12 @@ function makePathEntry(turn) {
   }
 
   function getChatGPTMessageTurns() {
+    const configured = selectorConfig?.platforms?.chatgpt?.turns || [];
     return dedupeElements(selectTopLevelCandidates([
+      ...configured,
       '[data-message-author-role]',
+      '[data-role]',
+      '.conversation-turn',
       "[data-testid='conversation-turn']",
       '[data-testid*="conversation-turn"]',
       '[data-testid*="message"]',
@@ -605,10 +616,14 @@ function makePathEntry(turn) {
   }
 
   function mapChatGPTTurn(turn, idx) {
-    const roleSource = turn.matches?.('[data-message-author-role]')
+    const roleSource = turn.matches?.('[data-message-author-role], [data-role]')
       ? turn
-      : turn.querySelector?.('[data-message-author-role]');
-    const roleValue = roleSource?.getAttribute('data-message-author-role') || turn.getAttribute('data-turn') || '';
+      : turn.querySelector?.('[data-message-author-role], [data-role]');
+    const configuredRoleAttrs = selectorConfig?.platforms?.chatgpt?.turnRoleAttr?.names || [];
+    const roleAttrs = [...new Set(['data-message-author-role', 'data-turn', 'data-role', ...configuredRoleAttrs])];
+    const roleValue = roleAttrs
+      .map(attr => roleSource?.getAttribute(attr) || turn.getAttribute(attr))
+      .find(Boolean) || '';
     const role = roleValue === 'user' ? 'user' : 'assistant';
     const msgDiv = turn.querySelector?.('[data-message-id]') || null;
     const msgId = msgDiv?.getAttribute('data-message-id')
@@ -679,6 +694,7 @@ function makePathEntry(turn) {
 
   function getClaudeUserTurns() {
     const selectors = [
+      ...(selectorConfig?.platforms?.claude?.humanTurn || []),
       '[data-testid="user-message"]',
       '[data-testid*="user-message"]',
       '[class*="font-user-message"]',
@@ -688,6 +704,7 @@ function makePathEntry(turn) {
       '[class*="human-turn"]',
       '[class*="HumanTurn"]',
       '[class*="UserMessage"]',
+      '[data-is-user="true"]',
     ];
     return dedupeElements(selectTopLevelCandidates(selectors)
       .filter(el => isReadableTurnCandidate(el, { minText: 0 })))
@@ -765,12 +782,15 @@ function makePathEntry(turn) {
 
   function getClaudeAssistantCandidates(userEls) {
     const selectors = [
+      ...(selectorConfig?.platforms?.claude?.assistantTurn || []),
       '[data-testid="assistant-turn"]',
       '[data-testid="assistant-message"]',
       '.font-claude-response',
       '.font-claude-response-body',
       '.standard-markdown',
       '[class*="font-claude-message"]',
+      '[data-message-author-role="assistant"]',
+      '[data-is-user="false"]',
       'main [class*="prose"]',
       'main [class*="whitespace-pre-wrap"]',
       'main [class*="markdown"]',
@@ -781,7 +801,7 @@ function makePathEntry(turn) {
       'main blockquote',
     ];
 
-    return dedupeElements(selectors.flatMap(sel => [...document.querySelectorAll(sel)]))
+    return dedupeElements(selectors.flatMap(safeQueryAll))
       .filter(el => isReadableTurnCandidate(el, { minText: 8 }))
       .filter(el => !userEls.some(userEl => userEl === el || userEl.contains(el)))
       .filter(el => !isClaudeBranchNavWidget(el))
@@ -951,8 +971,16 @@ function makePathEntry(turn) {
   }
 
   function selectTopLevelCandidates(selectors) {
-    const all = dedupeElements(selectors.flatMap(sel => [...document.querySelectorAll(sel)]));
+    const all = dedupeElements(selectors.flatMap(safeQueryAll));
     return all.filter(el => !all.some(other => other !== el && other.contains(el)));
+  }
+
+  function safeQueryAll(selector) {
+    try {
+      return [...document.querySelectorAll(selector)];
+    } catch (_) {
+      return [];
+    }
   }
 
   function dedupeElements(elements) {
@@ -1093,42 +1121,27 @@ function makePathEntry(turn) {
     return false;
   }
 
-  function isLikelyChatConversationPage() {
-    const path = (() => {
-      try {
-        return new URL(location.href).pathname || '';
-      } catch (_) {
-        return location.pathname || '';
-      }
-    })();
-
-    if (PLATFORM === 'chatgpt') {
-      return path.includes('/c/');
-    }
-
-    if (PLATFORM === 'claude') {
-      return path.startsWith('/chat/');
-    }
-
-    return false;
-  }
-
   function syncStateToPanel(force = false) {
     const turns = serializeTurns(readRawTurns());
     if (!turns.length) {
+      emptyTurnPolls += 1;
       if (pageSeemsLoading()) {
         sendToPanel({ type: 'CONVERSATION_LOADING' });
         return;
       }
-      if (isLikelyChatConversationPage()) {
+      if (document.visibilityState === 'visible'
+          && emptyTurnPolls >= EMPTY_TURN_CONFIRMATIONS
+          && cbvIsConversationRoute(PLATFORM, location.href)) {
         maybeReportBreakage('no_turns_detected', {
           phase: 'sync',
           force,
+          route: cbvClassifyConversationRoute(PLATFORM, location.href),
         });
       }
       sendToPanel({ type: 'CONVERSATION_LOADING' });
       return;
     }
+    emptyTurnPolls = 0;
     const activePath = turns.map(makePathEntry);
     const sig = JSON.stringify(turns.map(t => `${t.id}:${t.branchTotal}:${textSignature(t.text)}`));
     if (!force && sig === lastStateSig) return;
@@ -1146,6 +1159,7 @@ function makePathEntry(turn) {
         lastVisibleSig = '';
         lastDiagnostics = null;
         lastDiagnosticSig = '';
+        emptyTurnPolls = 0;
         resetLoadingWindow();
         sendToPanel({ type: 'PAGE_READY', platform: PLATFORM, url: location.href });
         syncStateToPanel(true);

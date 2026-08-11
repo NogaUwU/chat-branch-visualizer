@@ -20,6 +20,7 @@ const INCLUDE = [
   'background.js',
   'content.js',
   'platform-config.js',
+  'conversation-routes.js',
   'nav-geometry.js',
   'reporting-config.js',
   'selectors.json',

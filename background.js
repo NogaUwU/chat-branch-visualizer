@@ -3,7 +3,7 @@
 //   1. Open side panel when toolbar icon clicked
 //   2. Route messages between content.js <-> sidepanel.js
 
-importScripts('platform-config.js', 'reporting-config.js');
+importScripts('platform-config.js', 'conversation-routes.js', 'reporting-config.js');
 
 // ── Open side panel on action click ──────────────────────────────────────────
 chrome.action.onClicked.addListener(tab => {
@@ -48,7 +48,15 @@ function sanitizeUrlForDiagnostics(input) {
 
     // Keep only route pattern, remove concrete identifiers/query/hash.
     if (first === 'c') return `${parsed.origin}/c/:id`;
-    if (first === 'g') return `${parsed.origin}/g/:id`;
+    if (first === 'branch') return `${parsed.origin}/branch/:id`;
+    if (first === 'g') {
+      const conversationIndex = parts.indexOf('c', 2);
+      if (conversationIndex >= 2 && parts[conversationIndex + 1]) {
+        return `${parsed.origin}/g/:id/c/:id`;
+      }
+      return `${parsed.origin}/g/:id`;
+    }
+    if (first === 'chat') return `${parsed.origin}/chat/:id`;
     if (!first) return `${parsed.origin}/`;
     if (second) return `${parsed.origin}/${first}/${second}`;
     return `${parsed.origin}/${first}`;
@@ -60,9 +68,10 @@ function sanitizeUrlForDiagnostics(input) {
 function sanitizePageLabel(inputUrl, platform = '') {
   const base = sanitizeText(platform || 'unknown', 24) || 'unknown';
   try {
+    const route = cbvClassifyConversationRoute(platform, inputUrl);
+    if (route !== 'non-conversation') return `${base}:${route}`;
     const path = new URL(String(inputUrl || '')).pathname || '/';
-    if (path.includes('/c/')) return `${base}:conversation`;
-    if (path.startsWith('/g/')) return `${base}:project`; 
+    if (path.startsWith('/g/')) return `${base}:project`;
     if (path.startsWith('/apps')) return `${base}:apps`;
     return `${base}:page`;
   } catch (_) {
@@ -79,19 +88,12 @@ function pruneReportedDiagnostics(now = Date.now()) {
 
 function buildReportKey(diagnostics) {
   const broken = (diagnostics?.probe?.broken || []).join(',');
-  const url = (() => {
-    try {
-      const parsed = new URL(diagnostics?.url || '');
-      return `${parsed.origin}${parsed.pathname}`;
-    } catch (_) {
-      return sanitizeText(diagnostics?.url || '', 180);
-    }
-  })();
+  const route = cbvClassifyConversationRoute(diagnostics?.platform, diagnostics?.url);
   return [
     sanitizeText(diagnostics?.platform, 24),
     sanitizeText(diagnostics?.reason, 64),
     broken,
-    url,
+    route,
     Number.isFinite(diagnostics?.turnCount) ? diagnostics.turnCount : 0,
   ].join('|');
 }
@@ -167,6 +169,9 @@ async function shouldAutoSendDiagnostics(diagnostics) {
   if (platform !== 'chatgpt' && platform !== 'claude') return false;
   const reason = diagnostics?.reason || '';
   const broken = diagnostics?.probe?.broken || [];
+  if (reason === 'no_turns_detected' && !cbvIsConversationRoute(platform, diagnostics?.url)) {
+    return false;
+  }
   return broken.length > 0 || reason === 'build_error' || reason === 'no_turns_detected' || reason === 'branch_navigation_warning';
 }
 
@@ -176,6 +181,10 @@ async function postReport({ type, diagnostics, description = '', sender }) {
 
   const sanitized = sanitizeDiagnostics(diagnostics);
   if (!sanitized) return { ok: false, skipped: 'missing_diagnostics' };
+  if (type === 'auto_probe' && sanitized.reason === 'no_turns_detected'
+      && !cbvIsConversationRoute(sanitized.platform, sanitized.url)) {
+    return { ok: true, skipped: 'non_conversation_route' };
+  }
 
   const key = buildReportKey(sanitized);
   if (type === 'auto_probe' && wasDiagnosticRecentlySent(key)) {
@@ -200,8 +209,8 @@ async function postReport({ type, diagnostics, description = '', sender }) {
         client: 'chrome-extension',
         publicKey: config.publicKey || '',
         description: sanitizeText(description, 1500),
-        tabUrl: sanitizeUrlForDiagnostics(sender?.tab?.url || sanitized.url),
-        pageTitle: sanitizePageLabel(sender?.tab?.url || sanitized.url, sanitized.platform),
+        tabUrl: sanitized.url,
+        pageTitle: sanitizePageLabel(sanitized.url, sanitized.platform),
         extensionVersion: sanitizeText(sanitized.extensionVersion, 24),
         selectorVersion: sanitizeText(sanitized.selectorVersion, 40),
         diagnostics: sanitized,
