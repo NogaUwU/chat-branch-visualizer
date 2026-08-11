@@ -19,6 +19,8 @@ const INCLUDE = [
   'manifest.json',
   'background.js',
   'content.js',
+  'chatgpt-graph.js',
+  'chatgpt-page-bridge.js',
   'platform-config.js',
   'conversation-routes.js',
   'nav-geometry.js',

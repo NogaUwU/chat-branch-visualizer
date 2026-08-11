@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Chat Branch Visualizer",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Visualize conversation branches in ChatGPT/Claude as a native sidebar.",
   "permissions": ["storage", "sidePanel", "tabs"],
   "host_permissions": [
@@ -26,6 +26,15 @@
     }
   },
   "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["chatgpt-graph.js", "chatgpt-page-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://chatgpt.com/*",

@@ -13,6 +13,8 @@
   const BUILD_TIMEOUT_MS = 45000;
   const EMPTY_TURN_CONFIRMATIONS = 3;
   const DIAGNOSTIC_SNIPPET_LIMIT = 6;
+  const CHATGPT_GRAPH_WAIT_MS = 1200;
+  const BRIDGE_SOURCE = 'chat-branch-visualizer';
   const PLATFORM      = detectPlatform();
   const EXT_VERSION   = chrome.runtime.getManifest().version;
   const OPTIONAL_PROBE_KEYS = {
@@ -88,6 +90,8 @@
   let lastDiagnosticSig = '';
   let pageLoadStartedAt = Date.now();
   let emptyTurnPolls = 0;
+  let chatGptGraph = null;
+  let graphWaiters = [];
 
   // ── Platform ────────────────────────────────────────────────────────────────
   function detectPlatform() {
@@ -103,6 +107,10 @@
       return;
     }
     injectHighlightStyle();
+    if (PLATFORM === 'chatgpt') {
+      window.addEventListener('message', onPageBridgeMessage);
+      requestChatGptGraph();
+    }
     loadSelectorConfig().catch(() => {});
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       handleMessage(msg).then(sendResponse);
@@ -115,6 +123,59 @@
     sendToPanel({ type: 'PAGE_READY', platform: PLATFORM, url: location.href });
     syncStateToPanel(true);
     scheduleViewportSync();
+  }
+
+  function onPageBridgeMessage(event) {
+    if (event.source !== window || event.origin !== location.origin) return;
+    const payload = event.data;
+    if (payload?.source !== BRIDGE_SOURCE || payload.type !== 'CHATGPT_GRAPH') return;
+    if (!isGraphForCurrentPage(payload)) return;
+    if (!isValidConversationGraph(payload.graph)) return;
+
+    chatGptGraph = payload.graph;
+    const waiters = graphWaiters;
+    graphWaiters = [];
+    waiters.forEach(resolve => resolve(chatGptGraph));
+  }
+
+  function isGraphForCurrentPage(payload) {
+    try {
+      return new URL(payload.sourceUrl).pathname === location.pathname;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isValidConversationGraph(graph) {
+    return Boolean(
+      graph?.conversationId
+      && Array.isArray(graph.nodes)
+      && graph.nodes.length
+      && Array.isArray(graph.activePath)
+    );
+  }
+
+  function requestChatGptGraph() {
+    window.postMessage({
+      source: BRIDGE_SOURCE,
+      type: 'REQUEST_CHATGPT_GRAPH',
+    }, location.origin);
+  }
+
+  function waitForChatGptGraph() {
+    if (chatGptGraph) return Promise.resolve(chatGptGraph);
+    requestChatGptGraph();
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        graphWaiters = graphWaiters.filter(waiter => waiter !== done);
+        resolve(null);
+      }, CHATGPT_GRAPH_WAIT_MS);
+      const done = graph => {
+        clearTimeout(timer);
+        resolve(graph);
+      };
+      graphWaiters.push(done);
+    });
   }
 
   // ── Message handler ──────────────────────────────────────────────────────────
@@ -330,12 +391,38 @@ function makePathEntry(turn) {
     if (building) return { ok: false, reason: 'already_building' };
     building   = true;
     cancelled  = false;
-    observer?.disconnect();
-
-    const treeNodes = new Map();
-    const buildDeadline = Date.now() + BUILD_TIMEOUT_MS;
 
     sendToPanel({ type: 'BUILD_START' });
+
+    if (PLATFORM === 'chatgpt') {
+      const graph = await waitForChatGptGraph();
+      if (graph && !cancelled) {
+        const treeNodes = new Map(graph.nodes.map(node => [node.id, node]));
+        building = false;
+        sendToPanel({
+          type: 'BUILD_DONE',
+          nodes: graph.nodes,
+          activePath: graph.activePath,
+          source: 'conversation-graph',
+        });
+        saveToStorage(treeNodes, graph.activePath);
+        return panelMessage({ ok: true, source: 'conversation-graph' });
+      }
+      if (cancelled) {
+        building = false;
+        cancelled = false;
+        sendToPanel({ type: 'BUILD_CANCELLED' });
+        return { ok: false, reason: 'cancelled' };
+      }
+      sendToPanel({
+        type: 'BUILD_WARNING',
+        message: 'Conversation data was unavailable — using page traversal fallback',
+      });
+    }
+
+    observer?.disconnect();
+    const treeNodes = new Map();
+    const buildDeadline = Date.now() + BUILD_TIMEOUT_MS;
 
     try {
       await dfsCollect(null, 0, treeNodes, buildDeadline);
@@ -392,10 +479,16 @@ function makePathEntry(turn) {
 
   // ── NAVIGATE command ─────────────────────────────────────────────────────────
   async function cmdNavigate(path) {
-    for (const step of path) {
+    const activeByDepth = new Map(
+      (chatGptGraph?.activePath || []).map(entry => [entry.turnIndex, entry.id])
+    );
+    const branchSteps = PLATFORM === 'chatgpt' && chatGptGraph
+      ? path.filter(step => step.branchTotal > 1 && activeByDepth.get(step.turnIndex) !== step.id)
+      : path.filter(step => step.branchTotal > 1);
+
+    for (const step of branchSteps) {
       if (step.branchTotal <= 1) continue;
-      const turns = readRawTurns();
-      const turn  = turns[step.turnIndex];
+      const turn = await findGraphTurn(step);
       if (!turn) continue;
       if (turn.branchIndex !== step.branchIndex) {
         await navigateTurnToBranch(turn, step.branchIndex);
@@ -405,7 +498,9 @@ function makePathEntry(turn) {
     const leaf = path[path.length - 1];
     if (leaf) {
       sendToPanel({ type: 'CONVERSATION_LOADING' });
-      const stableTurn = await waitForTurnStable(leaf.turnIndex, leaf.branchIndex);
+      const stableTurn = PLATFORM === 'chatgpt' && chatGptGraph
+        ? await seekChatGptGraphTurn(leaf)
+        : await waitForTurnStable(leaf.turnIndex, leaf.branchIndex);
       if (stableTurn?.article) {
         scrollToTurn(stableTurn.article);
         highlightTurn(stableTurn.article);
@@ -415,6 +510,48 @@ function makePathEntry(turn) {
     sendToPanel({ type: 'NAV_DONE', activePath });
     scheduleViewportSync();
     return panelMessage({ ok: true, activePath });
+  }
+
+  async function findGraphTurn(step) {
+    const turns = readRawTurns();
+    const exact = turns.find(candidate => step.id && candidate.domId === step.id);
+    if (exact) return exact;
+    if (PLATFORM !== 'chatgpt' || !chatGptGraph) return turns[step.turnIndex] || null;
+
+    const activeSibling = chatGptGraph.activePath?.find(entry => entry.turnIndex === step.turnIndex);
+    if (activeSibling?.id) {
+      const mountedSibling = turns.find(candidate => candidate.domId === activeSibling.id);
+      if (mountedSibling) return mountedSibling;
+      return seekChatGptGraphTurn(activeSibling);
+    }
+    return seekChatGptGraphTurn(step);
+  }
+
+  async function seekChatGptGraphTurn(step) {
+    const exact = findMountedChatGptTurn(step.id);
+    if (exact) return exact;
+
+    const placeholder = findChatGptTurnPlaceholder(step.id);
+    if (!placeholder) return null;
+    placeholder.scrollIntoView({ block: 'center', behavior: 'instant' });
+
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await sleep(100);
+      const mounted = findMountedChatGptTurn(step.id);
+      if (mounted) return mounted;
+    }
+    return null;
+  }
+
+  function findMountedChatGptTurn(messageId) {
+    if (!messageId) return null;
+    return readRawTurns().find(turn => turn.domId === messageId) || null;
+  }
+
+  function findChatGptTurnPlaceholder(messageId) {
+    if (!messageId) return null;
+    return [...document.querySelectorAll('[data-turn-id-container]')]
+      .find(element => element.getAttribute('data-turn-id-container') === messageId) || null;
   }
 
   // ── DFS tree builder ─────────────────────────────────────────────────────────
@@ -649,6 +786,9 @@ function makePathEntry(turn) {
   // users to switch between edited messages. The assistant response following
   // each branch is considered a child of that branch.
   function readClaudeTurns() {
+    const messageRows = getClaudeMessageRows();
+    if (messageRows.length) return messageRows.map(mapClaudeMessageRow);
+
     const userEls = getClaudeUserTurns();
     if (!userEls.length) {
       const assistantOnly = getClaudeAssistantFallbackTurns();
@@ -690,6 +830,35 @@ function makePathEntry(turn) {
     });
 
     return turns;
+  }
+
+  function getClaudeMessageRows() {
+    const rows = safeQueryAll('[class*="group/message-row"]');
+    return rows
+      .filter(row => !rows.some(other => other !== row && other.contains(row)))
+      .filter(row => row.querySelector('[data-testid="user-message"], .standard-markdown'))
+      .sort((a, b) => rectTop(a) - rectTop(b));
+  }
+
+  function mapClaudeMessageRow(row, idx) {
+    const userMessage = row.querySelector('[data-testid="user-message"]');
+    const assistantMessage = row.querySelector('.standard-markdown');
+    const role = userMessage ? 'user' : 'assistant';
+    const messageElement = userMessage || assistantMessage || row;
+    const nav = role === 'user' ? findClaudeBranchNav(row) : null;
+    return {
+      turnIndex: idx,
+      domId: row.getAttribute('data-message-id')
+        || messageElement.getAttribute('data-message-id')
+        || null,
+      role,
+      text: extractText(messageElement),
+      branchIndex: nav?.current ?? 1,
+      branchTotal: nav?.total ?? 1,
+      prevBtn: nav?.prevBtn ?? null,
+      nextBtn: nav?.nextBtn ?? null,
+      article: row,
+    };
   }
 
   function getClaudeUserTurns() {
@@ -1155,6 +1324,8 @@ function makePathEntry(turn) {
       if (building) return;
       if (location.href !== lastUrl) {
         lastUrl = location.href;
+        chatGptGraph = null;
+        requestChatGptGraph();
         lastStateSig = '';
         lastVisibleSig = '';
         lastDiagnostics = null;
