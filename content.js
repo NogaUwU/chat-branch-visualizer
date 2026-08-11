@@ -10,7 +10,10 @@
   const NAV_RETRIES   = 2;     // retry attempts if nav appears stuck
   const DEBOUNCE_MS   = 180;
   const VIEWPORT_SYNC_MS = 100;
-  const BUILD_TIMEOUT_MS = 45000;
+  const BUILD_TIMEOUT_MS = 180000;
+  const HISTORY_SCAN_WAIT_MS = 260;
+  const HISTORY_STABLE_ROUNDS = 3;
+  const HISTORY_SCAN_MAX_STEPS = 160;
   const EMPTY_TURN_CONFIRMATIONS = 3;
   const DIAGNOSTIC_SNIPPET_LIMIT = 6;
   const PLATFORM      = detectPlatform();
@@ -334,19 +337,50 @@ function makePathEntry(turn) {
 
     const treeNodes = new Map();
     const buildDeadline = Date.now() + BUILD_TIMEOUT_MS;
+    const viewportState = captureViewportState();
+    let originalHistory = null;
 
     sendToPanel({ type: 'BUILD_START' });
+    showBuildOverlay();
 
     try {
-      await dfsCollect(null, 0, treeNodes, buildDeadline);
+      const history = await scanConversationHistory(buildDeadline);
+      originalHistory = history.entries.map(entry => ({ ...entry }));
+      const liveTurns = readRawTurns();
+      const retainsFullHistory = history.entries.length > 0
+        && liveTurns.length >= history.entries.length
+        && history.entries.every(entry => liveTurns.some(turn => cbvTurnKey(turn) === entry.key));
+
+      if (retainsFullHistory) {
+        sendToPanel({ type: 'BUILD_PHASE', phase: 'branches', message: 'Traversing conversation branches…' });
+        await scrollToBoundary('top');
+        await sleep(HISTORY_SCAN_WAIT_MS);
+        await dfsCollect(null, 0, treeNodes, buildDeadline);
+      } else {
+        sendToPanel({ type: 'BUILD_PHASE', phase: 'branches', message: 'Traversing virtualized conversation branches…' });
+        await dfsCollectCatalog(null, 0, history.entries, treeNodes, buildDeadline);
+      }
+
+      await restoreCatalogBranches(originalHistory, buildDeadline);
+      await restoreViewportState(viewportState);
+      hideBuildOverlay();
     } catch (e) {
-      const reason = cancelled ? 'cancelled' : e.message;
+      const wasCancelled = cancelled;
+      const reason = wasCancelled ? 'cancelled' : e.message;
+      cancelled = false;
+      if (originalHistory) {
+        await restoreCatalogBranches(originalHistory, Date.now() + 30000).catch(() => {});
+      }
+      await restoreViewportState(viewportState).catch(() => {});
+      hideBuildOverlay();
       building       = false;
-      cancelled      = false;
       lastStateSig   = '';
       lastVisibleSig = '';
       startObserver();
       if (reason === 'build_timeout') {
+        if (!treeNodes.size && originalHistory?.length) {
+          buildLinearCatalogTree(originalHistory, treeNodes);
+        }
         const activePath = readCurrentPath();
         sendToPanel({
           type: 'BUILD_DONE',
@@ -362,12 +396,33 @@ function makePathEntry(turn) {
         saveToStorage(treeNodes, activePath);
         return { ok: true, partial: true };
       }
-      maybeReportBreakage('build_error', {
-        phase: 'build',
-        message: reason,
-        cancelled,
-      });
-      sendToPanel({ type: cancelled ? 'BUILD_CANCELLED' : 'BUILD_ERROR', message: reason });
+      if (!wasCancelled && (treeNodes.size > 0 || originalHistory?.length)) {
+        if (!treeNodes.size && originalHistory?.length) {
+          buildLinearCatalogTree(originalHistory, treeNodes);
+        }
+        const activePath = readCurrentPath();
+        sendToPanel({
+          type: 'BUILD_DONE',
+          nodes: [...treeNodes.values()],
+          activePath,
+          partial: true,
+          reason,
+        });
+        sendToPanel({
+          type: 'BUILD_WARNING',
+          message: `Full traversal could not be verified (${reason}). Partial tree restored.`,
+        });
+        saveToStorage(treeNodes, activePath);
+        return { ok: true, partial: true };
+      }
+      if (!wasCancelled) {
+        maybeReportBreakage('build_error', {
+          phase: 'build',
+          message: reason,
+          cancelled: false,
+        });
+      }
+      sendToPanel({ type: wasCancelled ? 'BUILD_CANCELLED' : 'BUILD_ERROR', message: reason });
       return { ok: false };
     }
 
@@ -376,6 +431,7 @@ function makePathEntry(turn) {
     lastStateSig   = '';
     lastVisibleSig = '';
     startObserver();
+    hideBuildOverlay();
 
     const activePath = readCurrentPath();
     sendToPanel({
@@ -388,6 +444,204 @@ function makePathEntry(turn) {
     saveToStorage(treeNodes, activePath);
 
     return panelMessage({ ok: true });
+  }
+
+  async function scanConversationHistory(buildDeadline, { quiet = false } = {}) {
+    if (!quiet) {
+      sendToPanel({ type: 'BUILD_PHASE', phase: 'history', message: 'Loading conversation history…' });
+    }
+    const reachedTop = await reachHistoryBoundary('top', buildDeadline);
+    if (!reachedTop) throw new Error('history_top_not_stable');
+
+    const catalog = cbvCreateTurnCatalog();
+    const host = getScrollHost();
+    let stableRounds = 0;
+    let completed = false;
+
+    for (let step = 0; step < HISTORY_SCAN_MAX_STEPS; step++) {
+      assertBuildCanContinue(buildDeadline);
+      const metrics = getScrollMetrics(host);
+      const before = catalog.size();
+      catalog.addBatch(readRawTurns(), { scrollTop: metrics.top });
+      if (!quiet) {
+        sendToPanel({
+          type: 'BUILD_PHASE',
+          phase: 'history',
+          message: `Loading history · ${catalog.size()} turns found`,
+        });
+      }
+
+      const atBottom = metrics.top + metrics.clientHeight >= metrics.scrollHeight - 2;
+      stableRounds = atBottom && catalog.size() === before ? stableRounds + 1 : 0;
+      if (stableRounds >= HISTORY_STABLE_ROUNDS) {
+        completed = true;
+        break;
+      }
+
+      const nextTop = Math.min(
+        metrics.scrollHeight,
+        metrics.top + Math.max(240, Math.round(metrics.clientHeight * 0.72))
+      );
+      setScrollTop(host, atBottom ? metrics.scrollHeight : nextTop);
+      await sleep(HISTORY_SCAN_WAIT_MS);
+    }
+
+    if (catalog.size() === 0) throw new Error('no_turns_detected');
+    if (!completed) throw new Error('history_bottom_not_stable');
+    return catalog;
+  }
+
+  async function reachHistoryBoundary(boundary, buildDeadline) {
+    const host = getScrollHost();
+    let stableRounds = 0;
+    let previousHeight = -1;
+
+    for (let step = 0; step < HISTORY_SCAN_MAX_STEPS; step++) {
+      assertBuildCanContinue(buildDeadline);
+      const metrics = getScrollMetrics(host);
+      const atBoundary = boundary === 'top'
+        ? metrics.top <= 1
+        : metrics.top + metrics.clientHeight >= metrics.scrollHeight - 2;
+      const heightStable = metrics.scrollHeight === previousHeight;
+      stableRounds = atBoundary && heightStable ? stableRounds + 1 : 0;
+      if (stableRounds >= HISTORY_STABLE_ROUNDS) return true;
+      previousHeight = metrics.scrollHeight;
+      setScrollTop(host, boundary === 'top' ? 0 : metrics.scrollHeight);
+      await sleep(HISTORY_SCAN_WAIT_MS);
+    }
+    return false;
+  }
+
+  function assertBuildCanContinue(buildDeadline) {
+    if (cancelled) throw new Error('cancelled');
+    if (Date.now() > buildDeadline) throw new Error('build_timeout');
+  }
+
+  function buildLinearCatalogTree(entries, treeNodes) {
+    let parentId = null;
+    entries.forEach((entry, turnIndex) => {
+      const branchIndex = Math.max(1, entry.branchIndex || 1);
+      const id = entry.domId || `catalog_${turnIndex}_b${branchIndex}_${hashString(entry.key)}`;
+      const node = {
+        id,
+        parentId,
+        turnIndex,
+        branchIndex,
+        branchTotal: Math.max(1, entry.branchTotal || 1),
+        role: entry.role,
+        text: entry.text,
+        children: [],
+      };
+      treeNodes.set(id, node);
+      if (parentId && treeNodes.has(parentId)) treeNodes.get(parentId).children.push(id);
+      parentId = id;
+    });
+  }
+
+  async function dfsCollectCatalog(parentId, turnIndex, pathEntries, treeNodes, buildDeadline) {
+    assertBuildCanContinue(buildDeadline);
+    if (turnIndex >= pathEntries.length) return;
+
+    const entry = pathEntries[turnIndex];
+    const branchTotal = Math.max(1, entry.branchTotal || 1);
+    const originalBranch = Math.max(1, entry.branchIndex || 1);
+
+    for (let branchIndex = 1; branchIndex <= branchTotal; branchIndex++) {
+      assertBuildCanContinue(buildDeadline);
+      let branchPath = pathEntries;
+
+      if (branchTotal > 1) {
+        const currentPath = await scanConversationHistory(buildDeadline, { quiet: true });
+        const liveTurn = await locateCatalogTurn(currentPath.entries, turnIndex, buildDeadline);
+        if (!liveTurn) throw new Error(`virtualized_turn_not_found:${turnIndex}`);
+        if (liveTurn.branchIndex !== branchIndex) {
+          const reached = await navigateTurnToBranch(liveTurn, branchIndex);
+          if (!reached) throw new Error(`branch_navigation_failed:${turnIndex}:${branchIndex}`);
+          await sleep(NAV_WAIT_MS);
+        }
+        branchPath = (await scanConversationHistory(buildDeadline, { quiet: true })).entries;
+      }
+
+      const freshEntry = branchPath[turnIndex] || entry;
+      const nodeId = freshEntry.domId || `catalog_${turnIndex}_b${branchIndex}_${hashString(freshEntry.key)}`;
+      const node = {
+        id: nodeId,
+        parentId,
+        turnIndex,
+        branchIndex,
+        branchTotal,
+        role: freshEntry.role,
+        text: freshEntry.text,
+        children: [],
+      };
+
+      if (!treeNodes.has(nodeId)) treeNodes.set(nodeId, node);
+      else treeNodes.get(nodeId).text = node.text;
+      if (parentId && treeNodes.has(parentId)) {
+        const parent = treeNodes.get(parentId);
+        if (!parent.children.includes(nodeId)) parent.children.push(nodeId);
+      }
+
+      sendToPanel({
+        type: 'BUILD_PROGRESS',
+        nodeCount: treeNodes.size,
+        turnIdx: turnIndex,
+        b: branchIndex,
+        branchTotal,
+        turnCount: branchPath.length,
+      });
+
+      await dfsCollectCatalog(nodeId, turnIndex + 1, branchPath, treeNodes, buildDeadline);
+    }
+
+    if (branchTotal > 1) {
+      const currentPath = await scanConversationHistory(buildDeadline, { quiet: true });
+      const liveTurn = await locateCatalogTurn(currentPath.entries, turnIndex, buildDeadline);
+      if (liveTurn && liveTurn.branchIndex !== originalBranch) {
+        await navigateTurnToBranch(liveTurn, originalBranch);
+        await sleep(NAV_WAIT_MS);
+      }
+    }
+  }
+
+  async function locateCatalogTurn(entries, turnIndex, buildDeadline) {
+    const entry = entries[turnIndex];
+    if (!entry) return null;
+
+    const mounted = readRawTurns().find(turn => cbvTurnKey(turn) === entry.key);
+    if (mounted) return mounted;
+
+    const host = getScrollHost();
+    setScrollTop(host, entry.firstSeenAt || 0);
+    await sleep(HISTORY_SCAN_WAIT_MS);
+    const nearExpected = readRawTurns().find(turn => cbvTurnKey(turn) === entry.key);
+    if (nearExpected) return nearExpected;
+
+    await reachHistoryBoundary('top', buildDeadline);
+    for (let step = 0; step < HISTORY_SCAN_MAX_STEPS; step++) {
+      assertBuildCanContinue(buildDeadline);
+      const turns = readRawTurns();
+      const found = turns.find(turn => cbvTurnKey(turn) === entry.key);
+      if (found) return found;
+      const metrics = getScrollMetrics(host);
+      if (metrics.top + metrics.clientHeight >= metrics.scrollHeight - 2) break;
+      setScrollTop(host, metrics.top + Math.max(240, Math.round(metrics.clientHeight * 0.72)));
+      await sleep(HISTORY_SCAN_WAIT_MS);
+    }
+    return null;
+  }
+
+  async function restoreCatalogBranches(originalEntries, buildDeadline) {
+    if (!originalEntries?.length) return;
+    for (let turnIndex = 0; turnIndex < originalEntries.length; turnIndex++) {
+      const original = originalEntries[turnIndex];
+      if ((original.branchTotal || 1) <= 1) continue;
+      const currentPath = await scanConversationHistory(buildDeadline, { quiet: true });
+      const liveTurn = await locateCatalogTurn(currentPath.entries, turnIndex, buildDeadline);
+      if (!liveTurn || liveTurn.branchIndex === original.branchIndex) continue;
+      const restored = await navigateTurnToBranch(liveTurn, original.branchIndex);
+      if (restored) await sleep(NAV_WAIT_MS);
+    }
   }
 
   // ── NAVIGATE command ─────────────────────────────────────────────────────────
@@ -1047,6 +1301,15 @@ function makePathEntry(turn) {
     return String(text || '').trim().replace(/\s+/g, ' ').slice(0, 80);
   }
 
+  function hashString(input) {
+    let hash = 2166136261;
+    for (const char of String(input || '')) {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
   // ── Storage persistence ───────────────────────────────────────────────────────
   function saveToStorage(treeNodes, activePath) {
     const key = storageKey();
@@ -1217,6 +1480,105 @@ function makePathEntry(turn) {
     const hostRect = host.getBoundingClientRect();
     const targetTop = host.scrollTop + (rect.top - hostRect.top) - Math.max(48, Math.round(host.clientHeight * 0.18));
     host.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+  }
+
+  function captureViewportState() {
+    const host = getScrollHost();
+    const metrics = getScrollMetrics(host);
+    const visible = readRawTurns().find(turn => {
+      const rect = turn.article?.getBoundingClientRect();
+      if (!rect) return false;
+      const hostRect = host === window
+        ? { top: 0, bottom: window.innerHeight }
+        : host.getBoundingClientRect();
+      return rect.bottom > hostRect.top && rect.top < hostRect.bottom;
+    });
+    return {
+      anchorKey: visible ? cbvTurnKey(visible) : null,
+      ratio: metrics.scrollHeight > metrics.clientHeight
+        ? metrics.top / Math.max(1, metrics.scrollHeight - metrics.clientHeight)
+        : 0,
+    };
+  }
+
+  async function restoreViewportState(state) {
+    const host = getScrollHost();
+    const metrics = getScrollMetrics(host);
+    setScrollTop(
+      host,
+      Math.round((state?.ratio || 0) * Math.max(0, metrics.scrollHeight - metrics.clientHeight))
+    );
+    await sleep(HISTORY_SCAN_WAIT_MS);
+
+    if (!state?.anchorKey) return;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const anchor = readRawTurns().find(turn => cbvTurnKey(turn) === state.anchorKey);
+      if (anchor?.article) {
+        scrollTurnIntoView(anchor.article);
+        return;
+      }
+      await sleep(120);
+    }
+  }
+
+  function scrollTurnIntoView(article) {
+    const host = getScrollHost();
+    const rect = article.getBoundingClientRect();
+    if (host === window) {
+      window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - window.innerHeight * 0.28) });
+      return;
+    }
+    const hostRect = host.getBoundingClientRect();
+    host.scrollTo({ top: Math.max(0, host.scrollTop + rect.top - hostRect.top - host.clientHeight * 0.28) });
+  }
+
+  async function scrollToBoundary(boundary) {
+    const host = getScrollHost();
+    setScrollTop(host, boundary === 'top' ? 0 : getScrollMetrics(host).scrollHeight);
+    await sleep(HISTORY_SCAN_WAIT_MS);
+  }
+
+  function getScrollMetrics(host) {
+    if (host === window) {
+      const doc = document.scrollingElement || document.documentElement;
+      return {
+        top: window.scrollY || doc.scrollTop || 0,
+        scrollHeight: doc.scrollHeight,
+        clientHeight: window.innerHeight,
+      };
+    }
+    return {
+      top: host.scrollTop,
+      scrollHeight: host.scrollHeight,
+      clientHeight: host.clientHeight,
+    };
+  }
+
+  function setScrollTop(host, top) {
+    if (host === window) window.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+    else host.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+  }
+
+  function showBuildOverlay() {
+    if (document.getElementById('cbv-build-overlay')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'cbv-build-overlay';
+    overlay.setAttribute('aria-hidden', 'true');
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: '2147483646',
+      background: 'rgba(15, 23, 42, 0.18)',
+      backdropFilter: 'blur(5px)',
+      WebkitBackdropFilter: 'blur(5px)',
+      cursor: 'progress',
+      pointerEvents: 'auto',
+    });
+    document.documentElement.appendChild(overlay);
+  }
+
+  function hideBuildOverlay() {
+    document.getElementById('cbv-build-overlay')?.remove();
   }
 
   function injectHighlightStyle() {

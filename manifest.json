@@ -32,7 +32,7 @@
         "https://chat.openai.com/*",
         "https://claude.ai/*"
       ],
-      "js": ["platform-config.js", "conversation-routes.js", "nav-geometry.js", "reporting-config.js", "content.js"],
+      "js": ["platform-config.js", "conversation-routes.js", "turn-catalog.js", "nav-geometry.js", "reporting-config.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

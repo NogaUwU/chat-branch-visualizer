@@ -317,6 +317,12 @@ function onContentMessage(msg) {
       break;
     }
 
+    case 'BUILD_PHASE':
+      setStatus(msg.message || 'Building tree…', 'working');
+      if (msg.phase === 'history') setProgress(8);
+      if (msg.phase === 'branches') setProgress(18);
+      break;
+
     case 'BUILD_DONE':
       treeNodes   = new Map(msg.nodes.map(n => [n.id, n]));
       treeSource = msg.partial ? 'live' : 'build';

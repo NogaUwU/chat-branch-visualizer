@@ -21,6 +21,7 @@ const INCLUDE = [
   'content.js',
   'platform-config.js',
   'conversation-routes.js',
+  'turn-catalog.js',
   'nav-geometry.js',
   'reporting-config.js',
   'selectors.json',
