@@ -21,6 +21,8 @@ const INCLUDE = [
   'content.js',
   'chatgpt-graph.js',
   'chatgpt-page-bridge.js',
+  'claude-graph.js',
+  'claude-page-bridge.js',
   'platform-config.js',
   'conversation-routes.js',
   'nav-geometry.js',
