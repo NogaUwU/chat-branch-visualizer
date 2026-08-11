@@ -13,6 +13,8 @@
   const BUILD_TIMEOUT_MS = 45000;
   const EMPTY_TURN_CONFIRMATIONS = 3;
   const DIAGNOSTIC_SNIPPET_LIMIT = 6;
+  const CONVERSATION_GRAPH_WAIT_MS = 3000;
+  const BRIDGE_SOURCE = 'chat-branch-visualizer';
   const PLATFORM      = detectPlatform();
   const EXT_VERSION   = chrome.runtime.getManifest().version;
   const OPTIONAL_PROBE_KEYS = {
@@ -88,6 +90,8 @@
   let lastDiagnosticSig = '';
   let pageLoadStartedAt = Date.now();
   let emptyTurnPolls = 0;
+  let conversationGraph = null;
+  let graphWaiters = [];
 
   // ── Platform ────────────────────────────────────────────────────────────────
   function detectPlatform() {
@@ -103,6 +107,10 @@
       return;
     }
     injectHighlightStyle();
+    if (PLATFORM === 'chatgpt' || PLATFORM === 'claude') {
+      window.addEventListener('message', onPageBridgeMessage);
+      requestConversationGraph();
+    }
     loadSelectorConfig().catch(() => {});
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       handleMessage(msg).then(sendResponse);
@@ -115,6 +123,65 @@
     sendToPanel({ type: 'PAGE_READY', platform: PLATFORM, url: location.href });
     syncStateToPanel(true);
     scheduleViewportSync();
+  }
+
+  function onPageBridgeMessage(event) {
+    if (event.source !== window || event.origin !== location.origin) return;
+    const payload = event.data;
+    const expectedType = PLATFORM === 'claude' ? 'CLAUDE_GRAPH' : 'CHATGPT_GRAPH';
+    if (payload?.source !== BRIDGE_SOURCE || payload.type !== expectedType) return;
+    if (!isGraphForCurrentPage(payload)) return;
+    if (!isValidConversationGraph(payload.graph)) return;
+
+    conversationGraph = payload.graph;
+    const waiters = graphWaiters;
+    graphWaiters = [];
+    waiters.forEach(resolve => resolve(conversationGraph));
+  }
+
+  function isGraphForCurrentPage(payload) {
+    try {
+      return new URL(payload.sourceUrl).pathname === location.pathname;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isValidConversationGraph(graph) {
+    return Boolean(
+      graph?.conversationId
+      && Array.isArray(graph.nodes)
+      && graph.nodes.length
+      && Array.isArray(graph.activePath)
+    );
+  }
+
+  function requestConversationGraph() {
+    window.postMessage({
+      source: BRIDGE_SOURCE,
+      type: PLATFORM === 'claude' ? 'REQUEST_CLAUDE_GRAPH' : 'REQUEST_CHATGPT_GRAPH',
+    }, location.origin);
+  }
+
+  function waitForConversationGraph() {
+    if (conversationGraph) return Promise.resolve(conversationGraph);
+    requestConversationGraph();
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        graphWaiters = graphWaiters.filter(waiter => waiter !== done);
+        resolve(null);
+      }, CONVERSATION_GRAPH_WAIT_MS);
+      const done = graph => {
+        clearTimeout(timer);
+        resolve(graph);
+      };
+      graphWaiters.push(done);
+    });
+  }
+
+  function refreshConversationGraph() {
+    conversationGraph = null;
+    return waitForConversationGraph();
   }
 
   // ── Message handler ──────────────────────────────────────────────────────────
@@ -330,12 +397,38 @@ function makePathEntry(turn) {
     if (building) return { ok: false, reason: 'already_building' };
     building   = true;
     cancelled  = false;
-    observer?.disconnect();
-
-    const treeNodes = new Map();
-    const buildDeadline = Date.now() + BUILD_TIMEOUT_MS;
 
     sendToPanel({ type: 'BUILD_START' });
+
+    if (PLATFORM === 'chatgpt' || PLATFORM === 'claude') {
+      const graph = await waitForConversationGraph();
+      if (graph && !cancelled) {
+        const treeNodes = new Map(graph.nodes.map(node => [node.id, node]));
+        building = false;
+        sendToPanel({
+          type: 'BUILD_DONE',
+          nodes: graph.nodes,
+          activePath: graph.activePath,
+          source: 'conversation-graph',
+        });
+        saveToStorage(treeNodes, graph.activePath);
+        return panelMessage({ ok: true, source: 'conversation-graph' });
+      }
+      if (cancelled) {
+        building = false;
+        cancelled = false;
+        sendToPanel({ type: 'BUILD_CANCELLED' });
+        return { ok: false, reason: 'cancelled' };
+      }
+      sendToPanel({
+        type: 'BUILD_WARNING',
+        message: 'Conversation data was unavailable — using page traversal fallback',
+      });
+    }
+
+    observer?.disconnect();
+    const treeNodes = new Map();
+    const buildDeadline = Date.now() + BUILD_TIMEOUT_MS;
 
     try {
       await dfsCollect(null, 0, treeNodes, buildDeadline);
@@ -392,20 +485,32 @@ function makePathEntry(turn) {
 
   // ── NAVIGATE command ─────────────────────────────────────────────────────────
   async function cmdNavigate(path) {
-    for (const step of path) {
+    const activeByDepth = new Map(
+      (conversationGraph?.activePath || []).map(entry => [entry.turnIndex, entry.id])
+    );
+    const branchSteps = conversationGraph
+      ? path.filter(step => step.branchTotal > 1 && activeByDepth.get(step.turnIndex) !== step.id)
+      : path.filter(step => step.branchTotal > 1);
+
+    let switchedBranch = false;
+    for (const step of branchSteps) {
       if (step.branchTotal <= 1) continue;
-      const turns = readRawTurns();
-      const turn  = turns[step.turnIndex];
+      const turn = await findGraphTurn(step);
       if (!turn) continue;
       if (turn.branchIndex !== step.branchIndex) {
-        await navigateTurnToBranch(turn, step.branchIndex);
+        switchedBranch = await navigateTurnToBranch(turn, step.branchIndex) || switchedBranch;
         await sleep(NAV_WAIT_MS);
       }
     }
+    if (switchedBranch) await refreshConversationGraph();
     const leaf = path[path.length - 1];
     if (leaf) {
       sendToPanel({ type: 'CONVERSATION_LOADING' });
-      const stableTurn = await waitForTurnStable(leaf.turnIndex, leaf.branchIndex);
+      const stableTurn = PLATFORM === 'chatgpt' && conversationGraph
+        ? await seekChatGptGraphTurn(leaf)
+        : PLATFORM === 'claude' && conversationGraph
+          ? await seekClaudeGraphTurn(leaf)
+          : await waitForTurnStable(leaf.turnIndex, leaf.branchIndex);
       if (stableTurn?.article) {
         scrollToTurn(stableTurn.article);
         highlightTurn(stableTurn.article);
@@ -415,6 +520,89 @@ function makePathEntry(turn) {
     sendToPanel({ type: 'NAV_DONE', activePath });
     scheduleViewportSync();
     return panelMessage({ ok: true, activePath });
+  }
+
+  async function findGraphTurn(step) {
+    const turns = readRawTurns();
+    const exact = turns.find(candidate => step.id && candidate.domId === step.id);
+    if (exact) return exact;
+    if (!conversationGraph) return turns[step.turnIndex] || null;
+
+    const activeSibling = conversationGraph.activePath?.find(entry => entry.turnIndex === step.turnIndex);
+    if (activeSibling?.id) {
+      const mountedSibling = turns.find(candidate => candidate.domId === activeSibling.id);
+      if (mountedSibling) return mountedSibling;
+      return PLATFORM === 'chatgpt'
+        ? seekChatGptGraphTurn(activeSibling)
+        : seekClaudeGraphTurn(activeSibling);
+    }
+    return PLATFORM === 'chatgpt'
+      ? seekChatGptGraphTurn(step)
+      : seekClaudeGraphTurn(step);
+  }
+
+  async function seekChatGptGraphTurn(step) {
+    const exact = findMountedChatGptTurn(step.id);
+    if (exact) return exact;
+
+    const placeholder = findChatGptTurnPlaceholder(step.id);
+    if (!placeholder) return null;
+    placeholder.scrollIntoView({ block: 'center', behavior: 'instant' });
+
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await sleep(100);
+      const mounted = findMountedChatGptTurn(step.id);
+      if (mounted) return mounted;
+    }
+    return null;
+  }
+
+  function findMountedChatGptTurn(messageId) {
+    if (!messageId) return null;
+    return readRawTurns().find(turn => turn.domId === messageId) || null;
+  }
+
+  async function seekClaudeGraphTurn(step) {
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const exact = findMountedClaudeTurn(step);
+      if (exact) return exact;
+
+      const mounted = readRawTurns();
+      const firstIndex = mounted[0]?.turnIndex;
+      const lastIndex = mounted[mounted.length - 1]?.turnIndex;
+      const host = getScrollHost();
+      if (host === window) return null;
+
+      if (Number.isFinite(firstIndex) && Number.isFinite(lastIndex) && lastIndex >= firstIndex) {
+        const mountedSpan = Math.max(1, lastIndex - firstIndex + 1);
+        const pixelPerTurn = Math.max(24, host.clientHeight / mountedSpan);
+        const indexDelta = step.turnIndex < firstIndex
+          ? step.turnIndex - firstIndex
+          : step.turnIndex > lastIndex
+            ? step.turnIndex - lastIndex
+            : 0;
+        host.scrollTop = Math.max(
+          0,
+          Math.min(host.scrollHeight - host.clientHeight, host.scrollTop + indexDelta * pixelPerTurn)
+        );
+      } else {
+        const activeLength = Math.max(1, conversationGraph?.activePath?.length || 1);
+        host.scrollTop = (step.turnIndex / Math.max(1, activeLength - 1))
+          * Math.max(0, host.scrollHeight - host.clientHeight);
+      }
+      await sleep(120);
+    }
+    return findMountedClaudeTurn(step);
+  }
+
+  function findMountedClaudeTurn(step) {
+    return readRawTurns().find(turn => turn.turnIndex === step.turnIndex) || null;
+  }
+
+  function findChatGptTurnPlaceholder(messageId) {
+    if (!messageId) return null;
+    return [...document.querySelectorAll('[data-turn-id-container]')]
+      .find(element => element.getAttribute('data-turn-id-container') === messageId) || null;
   }
 
   // ── DFS tree builder ─────────────────────────────────────────────────────────
@@ -528,7 +716,7 @@ function makePathEntry(turn) {
       if (cancelled) return false;
 
       // Retry: re-read the turn and try once more
-      const fresh = readRawTurns()[turn.turnIndex];
+      const fresh = findCurrentTurn(turn);
       if (!fresh) return false;
       if (fresh.branchIndex === target) return true;
 
@@ -548,7 +736,7 @@ function makePathEntry(turn) {
       if (cancelled) return false;
       if (Date.now() > deadline) return false;
 
-      const fresh = readRawTurns()[turn.turnIndex];
+      const fresh = findCurrentTurn(turn);
       if (!fresh) return false;
       if (fresh.branchIndex === target) return true;
       if (target < 1 || target > (fresh.branchTotal || 1)) return false;
@@ -563,7 +751,7 @@ function makePathEntry(turn) {
         // Try once after bringing the turn into view; if still unavailable, fail fast.
         if (fresh.article) scrollToTurn(fresh.article);
         await sleep(Math.min(NAV_WAIT_MS, 220));
-        const retried = readRawTurns()[turn.turnIndex];
+        const retried = findCurrentTurn(turn);
         const retryBtn = wantsNext ? retried?.nextBtn : retried?.prevBtn;
         if (!retryBtn || isDisabledButton(retryBtn)) return false;
         retryBtn.click();
@@ -577,8 +765,16 @@ function makePathEntry(turn) {
     }
 
     // One last check
-    const final = readRawTurns()[turn.turnIndex];
+    const final = findCurrentTurn(turn);
     return final?.branchIndex === target;
+  }
+
+  function findCurrentTurn(turn) {
+    const turns = readRawTurns();
+    return turns.find(candidate => (
+      candidate.turnIndex === turn.turnIndex
+      && (!turn.domId || !candidate.domId || candidate.domId === turn.domId)
+    )) || turns.find(candidate => candidate.turnIndex === turn.turnIndex) || null;
   }
 
   // ── DOM reading ──────────────────────────────────────────────────────────────
@@ -649,6 +845,9 @@ function makePathEntry(turn) {
   // users to switch between edited messages. The assistant response following
   // each branch is considered a child of that branch.
   function readClaudeTurns() {
+    const messageRows = getClaudeMessageRows();
+    if (messageRows.length) return messageRows.map(mapClaudeMessageRow);
+
     const userEls = getClaudeUserTurns();
     if (!userEls.length) {
       const assistantOnly = getClaudeAssistantFallbackTurns();
@@ -690,6 +889,47 @@ function makePathEntry(turn) {
     });
 
     return turns;
+  }
+
+  function getClaudeMessageRows() {
+    const rows = safeQueryAll('[class*="group/message-row"]');
+    return rows
+      .filter(row => !rows.some(other => other !== row && other.contains(row)))
+      .filter(row => row.querySelector('[data-testid="user-message"], .standard-markdown'))
+      .sort((a, b) => rectTop(a) - rectTop(b));
+  }
+
+  function mapClaudeMessageRow(row, idx) {
+    const userMessage = row.querySelector('[data-testid="user-message"]');
+    const assistantMessage = row.querySelector('.standard-markdown');
+    const role = userMessage ? 'user' : 'assistant';
+    const messageElement = userMessage || assistantMessage || row;
+    const nav = role === 'user' ? findClaudeBranchNav(row) : null;
+    const virtualItem = row.closest('[data-index], [data-rs-index], [role="article"][aria-posinset]');
+    const virtualIndex = Number(
+      virtualItem?.getAttribute('data-index')
+      ?? virtualItem?.getAttribute('data-rs-index')
+      ?? Number(virtualItem?.getAttribute('aria-posinset') || 0) - 1
+    );
+    const turnIndex = Number.isFinite(virtualIndex) ? virtualIndex : idx;
+    const graphEntry = conversationGraph?.activePath?.find(entry => entry.turnIndex === turnIndex);
+    const graphNode = graphEntry
+      ? conversationGraph.nodes?.find(node => node.id === graphEntry.id)
+      : null;
+    return {
+      turnIndex,
+      domId: graphEntry?.id
+        || row.getAttribute('data-message-id')
+        || messageElement.getAttribute('data-message-id')
+        || null,
+      role,
+      text: extractText(messageElement),
+      branchIndex: nav?.current ?? graphNode?.branchIndex ?? 1,
+      branchTotal: nav?.total ?? graphNode?.branchTotal ?? 1,
+      prevBtn: nav?.prevBtn ?? null,
+      nextBtn: nav?.nextBtn ?? null,
+      article: row,
+    };
   }
 
   function getClaudeUserTurns() {
@@ -1155,6 +1395,8 @@ function makePathEntry(turn) {
       if (building) return;
       if (location.href !== lastUrl) {
         lastUrl = location.href;
+        conversationGraph = null;
+        requestConversationGraph();
         lastStateSig = '';
         lastVisibleSig = '';
         lastDiagnostics = null;

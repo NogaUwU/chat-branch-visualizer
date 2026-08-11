@@ -283,17 +283,16 @@ function onContentMessage(msg) {
       const wasPartial = treeCompleteness === 'partial';
       msg.turns = sanitizeTurns(msg.turns);
       if (treeCompleteness !== 'full') {
-        if (msg.turns.length) mergeTurnsIntoTree(msg.turns);
-        else replaceTreeWithTurns(msg.turns);
+        replaceTreeWithTurns(msg.turns);
         setTreeCompleteness(msg.turns.length ? 'partial' : (treeLoadingMode === 'conversation' ? 'loading' : 'empty'));
+        setActivePathState(sanitizePathTurns(msg.turns.map(t => ({
+          id: t.id || `t${t.turnIndex}_b${t.branchIndex}`,
+          turnIndex: t.turnIndex,
+          branchIndex: t.branchIndex,
+          role: t.role,
+          text: t.text,
+        }))));
       }
-      setActivePathState(sanitizePathTurns(msg.turns.map(t => ({
-        id: t.id || `t${t.turnIndex}_b${t.branchIndex}`,
-        turnIndex: t.turnIndex,
-        branchIndex: t.branchIndex,
-        role: t.role,
-        text: t.text,
-      }))));
       setVisiblePathState([]);
       if (treeCompleteness === 'partial' && (wasEmpty || !wasPartial)) setExpandedByDefaultForPartial();
       renderTree();
@@ -305,7 +304,9 @@ function onContentMessage(msg) {
       treeSource = 'live';
       setTreeCompleteness('building');
       setProgress(0); showProgress();
-      showTreeLoading('Building full tree…', `${assistantDisplayName()} may switch branches while history is collected`, 'build');
+      showTreeLoading('Building full tree…', currentPlatform === 'chatgpt'
+        ? 'Reading the conversation graph'
+        : `${assistantDisplayName()} may switch branches while history is collected`, 'build');
       setStatus('Building tree…', 'working');
       setBuildBusy();
       break;
@@ -397,18 +398,11 @@ function onContentMessage(msg) {
       msg.turns = sanitizeTurns(msg.turns);
       msg.activePath = sanitizePathTurns(msg.activePath);
       const isFull = treeCompleteness === 'full';
-      const isSnapshot = treeSource === 'snapshot';
-      if (!isFull || !isSnapshot) {
-        if (msg.turns.length) {
-          mergeTurnsIntoTree(msg.turns);
-        } else if (!isFull) {
-          replaceTreeWithTurns(msg.turns);
-        }
-        if (!isFull) {
-          setTreeCompleteness(msg.turns.length ? 'partial' : (treeLoadingMode === 'conversation' ? 'loading' : 'empty'));
-        }
+      if (!isFull) {
+        replaceTreeWithTurns(msg.turns);
+        setTreeCompleteness(msg.turns.length ? 'partial' : (treeLoadingMode === 'conversation' ? 'loading' : 'empty'));
+        setActivePathState(msg.activePath);
       }
-      setActivePathState(msg.activePath);
       if (msg.turns.length > 0 || msg.activePath.length > 0) hideTreeLoading(false);
       if (treeCompleteness === 'partial' && (wasEmpty || !wasPartial)) setExpandedByDefaultForPartial();
       renderTree();
@@ -449,7 +443,12 @@ function navigateTo(nodeId) {
   const path = [];
   let cur = node;
   while (cur) {
-    path.unshift({ turnIndex: cur.turnIndex, branchIndex: cur.branchIndex, branchTotal: cur.branchTotal });
+    path.unshift({
+      id: cur.id,
+      turnIndex: cur.turnIndex,
+      branchIndex: cur.branchIndex,
+      branchTotal: cur.branchTotal,
+    });
     cur = cur.parentId ? treeNodes.get(cur.parentId) : null;
   }
   sendToContent({ type: 'NAVIGATE', path });
@@ -530,47 +529,6 @@ function describeActivePathStatus(path) {
   const leaf = (path || []).at(-1);
   if (!leaf) return 'Navigation complete';
   return `Viewing turn ${leaf.turnIndex + 1}, branch ${leaf.branchIndex}`;
-}
-
-function mergeTurnsIntoTree(turns) {
-  turns = sanitizeTurns(turns);
-  if (!turns?.length) return;
-  let parentId = null;
-  for (const turn of turns) {
-    const id = turn.id || `t${turn.turnIndex}_b${turn.branchIndex}`;
-    const existing = treeNodes.get(id);
-    const node = treeNodes.get(id) || {
-      id,
-      parentId,
-      turnIndex: turn.turnIndex,
-      branchIndex: turn.branchIndex,
-      branchTotal: turn.branchTotal || 1,
-      role: turn.role,
-      text: turn.text || '',
-      children: [],
-    };
-
-    const oldParentId = existing?.parentId ?? null;
-    if (oldParentId && oldParentId !== parentId && treeNodes.has(oldParentId)) {
-      const oldParent = treeNodes.get(oldParentId);
-      oldParent.children = (oldParent.children || []).filter(childId => childId !== id);
-    }
-
-    node.parentId = parentId;
-    node.turnIndex = turn.turnIndex;
-    node.branchIndex = turn.branchIndex;
-    node.branchTotal = Math.max(node.branchTotal || 1, turn.branchTotal || 1);
-    node.role = turn.role;
-    node.text = turn.text || node.text;
-    if (!Array.isArray(node.children)) node.children = [];
-    treeNodes.set(id, node);
-
-    if (parentId && treeNodes.has(parentId)) {
-      const parent = treeNodes.get(parentId);
-      if (!parent.children.includes(id)) parent.children.push(id);
-    }
-    parentId = id;
-  }
 }
 
 function replaceTreeWithTurns(turns) {
