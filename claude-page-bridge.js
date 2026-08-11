@@ -58,7 +58,7 @@
       for (const organizationId of organizationIds) {
         const response = await nativeFetch.call(
           window,
-          `/api/organizations/${organizationId}/chat_conversations/${conversationId}`,
+          `/api/organizations/${organizationId}/chat_conversations/${conversationId}?tree=true`,
           { credentials: 'include' }
         );
         if (!response.ok) continue;
