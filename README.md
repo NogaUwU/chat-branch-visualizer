@@ -4,7 +4,7 @@
 
 **Visualize your ChatGPT and Claude conversation branches as an interactive tree — in Chrome's native side panel.**
 
-[![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-v0.3.7-blue?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/chat-branch-visualizer/mahknjdihdpeceompocgcclnmjikmncb)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-v0.3.8-blue?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/chat-branch-visualizer/mahknjdihdpeceompocgcclnmjikmncb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
@@ -52,6 +52,7 @@ git clone https://github.com/FuugaMo/chat-branch-visualizer.git
 ├── manifest.json          Extension manifest (MV3)
 ├── content.js             DOM parser + branch navigator (runs in chat pages)
 ├── platform-config.js     Platform detection shared across contexts
+├── conversation-routes.js Supported conversation route classification
 ├── reporting-config.js    Diagnostics reporting config
 ├── selectors.json         CSS selector registry for both platforms
 ├── background.js          Service worker — message routing + auto-reporting
@@ -82,10 +83,10 @@ When breakage is detected and the user has opted in, a report flows through:
 content.js detects selector breakage / build error
   └─ PROBE_RESULT → background.js
        ├─ Consent check (cbv_consent.autoSend must be true)
-       ├─ Deduplication (same platform+reason+broken selectors+url within 30 min → skip)
+       ├─ Deduplication (same platform+reason+broken selectors+route within 30 min → skip)
        └─ POST ──▶ api/reports.js (Vercel)
                         └─ repository_dispatch: extension_breakage_report
-                             └─ report-intake.yml
+                             └─ report-intake.yml (route-aware aggregation + repeat suppression)
                                   └─ Buffer: 3 identical reports → promoted to visible issue
                                        └─ OpenClaw opens fix PR (auto-fix label)
                                             └─ Codex reviews → human approves → auto-merge

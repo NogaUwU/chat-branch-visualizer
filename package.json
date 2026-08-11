@@ -2,6 +2,7 @@
   "name": "chat-branch-visualizer-dev",
   "private": true,
   "scripts": {
+    "test": "node --test",
     "probe": "node scripts/probe.js",
     "review": "node scripts/review-pr.js",
     "patch": "node scripts/openclaw-patch.js",

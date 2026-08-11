@@ -7,6 +7,7 @@ const {
   githubRequest,
   parseReportBody,
 } = require('./_lib/reporting');
+const { isConversationRoute } = require('../conversation-routes');
 
 function readBody(req) {
   if (req.body) return Promise.resolve(req.body);
@@ -51,6 +52,14 @@ module.exports = async (req, res) => {
     }
     if (!isAuthorized(req, report)) {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    if (report.type !== 'user_report'
+        && report.diagnostics.reason === 'no_turns_detected'
+        && !isConversationRoute(report.diagnostics.platform, report.diagnostics.url || report.tabUrl)) {
+      return res.status(202).json({
+        ok: true,
+        skipped: 'non_conversation_route',
+      });
     }
 
     const token = process.env.GITHUB_TOKEN;
